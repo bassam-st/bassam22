@@ -2,3 +2,8 @@ fastapi
 uvicorn
 requests
 beautifulsoup4
+readability-lxml
+diskcache
+fpdf2
+duckduckgo-search
+python-multipart
