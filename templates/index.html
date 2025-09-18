@@ -1,28 +1,51 @@
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="ar" dir="rtl" data-theme="light">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>تطبيق بسام الذكي</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <link rel="manifest" href="/static/manifest.webmanifest">
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>بسام الذكي</title>
+  <style>
+    body { font-family: Tahoma, Arial; max-width: 800px; margin: auto; padding: 20px; background: var(--bg); color: var(--fg); }
+    :root { --bg:#fff; --fg:#111; --card:#f2f2f2; }
+    [data-theme="dark"] { --bg:#111; --fg:#eee; --card:#222; }
+    input, select, button { padding:10px; margin:5px 0; border-radius:6px; border:1px solid #888; width:100%; }
+    button { cursor:pointer; }
+    .card { background:var(--card); padding:10px; margin-top:10px; border-radius:6px; }
+  </style>
 </head>
 <body>
-  <header>
-    <h1>مرحباً بك في تطبيق بسام الذكي 🎉</h1>
-  </header>
+  <h2>🤖 بسام الذكي (مبسّط)</h2>
 
-  <main>
-    <form action="/search" method="get">
-      <input type="text" name="q" placeholder="ابحث هنا...">
-      <button type="submit">بحث</button>
-    </form>
-  </main>
+  <form method="post">
+    <input type="text" name="question" placeholder="اكتب سؤالك أو اسم السلعة..." value="{{ q }}" required>
+    <select name="mode">
+      <option value="summary" {{ 'selected' if mode=='summary' else '' }}>بحث & تلخيص</option>
+      <option value="prices"  {{ 'selected' if mode=='prices'  else '' }}>بحث أسعار</option>
+      <option value="images"  {{ 'selected' if mode=='images'  else '' }}>بحث صور</option>
+    </select>
+    <button type="submit">🔍 تنفيذ</button>
+  </form>
 
-  <footer>
-    <p>© 2025 بسام الشتيمي</p>
-  </footer>
+  {% if q %}
+  <div style="margin-top:10px;">
+    <button onclick="copyAnswer(`{{ (answer_text or '').replace('\\','\\\\').replace(\"'\",\"\\'\").replace('\\n','\\n') }}`)">📋 نسخ الإجابة</button>
+    <a href="/export_pdf?q={{ q }}&mode={{ mode }}" target="_blank"><button type="button">🖨️ تصدير PDF</button></a>
+    <button onclick="toggleTheme()">🌓 تبديل الوضع</button>
+  </div>
+  {% endif %}
 
-  <script src="/static/sw.js"></script>
+  <div id="panel">{{ result_panel | safe }}</div>
+
+<script>
+function toggleTheme(){
+  const cur=document.documentElement.getAttribute("data-theme")||"light";
+  const next=cur==="light"?"dark":"light";
+  document.documentElement.setAttribute("data-theme",next);
+}
+async function copyAnswer(txt){
+  try{await navigator.clipboard.writeText(txt);alert("✅ تم النسخ");}
+  catch(e){alert("تعذر النسخ");}
+}
+</script>
 </body>
 </html>
