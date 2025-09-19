@@ -7,3 +7,4 @@ diskcache
 fpdf2
 duckduckgo-search
 python-multipart
+jinja2
