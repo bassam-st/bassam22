@@ -1,9 +1,8 @@
-# main.py — تطبيق Bassam الذكي
+# main.py — تطبيق Bassam الذكي 🚀
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-import httpx
 
 app = FastAPI(title="Bassam الذكي", version="1.0")
 
@@ -16,12 +15,12 @@ templates = Jinja2Templates(directory="templates")
 async def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-
-# نفس الصفحة لكن تستقبل POST (من نموذج البحث)
+# نموذج البحث (POST)
 @app.post("/", response_class=HTMLResponse)
 async def search(request: Request, question: str = Form(...), mode: str = Form("summary")):
-    # هنا تقدر تضيف المنطق لاحقاً (بحث، أسعار، صور…)
-    answer_text = f"🔎 هذا مثال: بحثت عن — {question} (الوضع: {mode})"
+    # مؤقتًا: نعيد السؤال + نوع البحث (إلى أن نضيف المنطق لاحقًا)
+    answer_text = f"🔍 سؤالك: {question}\n⚙️ النمط: {mode}"
+
     return templates.TemplateResponse(
         "index.html",
         {
@@ -29,19 +28,23 @@ async def search(request: Request, question: str = Form(...), mode: str = Form("
             "q": question,
             "mode": mode,
             "answer_text": answer_text,
-            "result_panel": "",
-        },
+            "result_panel": ""
+        }
     )
 
-
-# صفحة فحص الصحة (تساعد Render)
+# مسار فحص الصحة
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
 
-
-# صفحة API للتجربة (اختياري)
+# مسار الوقت الحالي
+from datetime import datetime
 @app.get("/time")
 async def time_now():
-    import datetime
-    return {"time": datetime.datetime.utcnow().isoformat()}
+    return {"time": datetime.utcnow().isoformat()}
+
+# لقبول طلب HEAD (حتى لا يظهر خطأ 405)
+from fastapi import Response
+@app.head("/")
+async def home_head():
+    return Response(status_code=204)
