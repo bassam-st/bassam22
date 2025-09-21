@@ -1,47 +1,50 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
-  <meta charset="UTF-8">
-  <title>Bassam الذكي – بحث عربي + تلخيص + أسعار + صور + PDF</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Bassam الذكي — بحث عربي + رياضيات</title>
+  <link rel="manifest" href="/static/manifest.webmanifest">
   <style>
-    body { font-family: Tahoma, Arial, sans-serif; margin:20px; background:#f5f5f5; }
-    h1 { color:#0056b3; text-align:center; }
-    form { text-align:center; margin-bottom:20px; }
-    input[type=text] { width:60%; padding:10px; font-size:16px; }
-    button { padding:10px 20px; font-size:16px; background:#0056b3; color:white; border:none; cursor:pointer; }
-    button:hover { background:#003d80; }
-    .result { background:white; padding:15px; margin-top:15px; border-radius:8px; box-shadow:0 0 5px #aaa; }
-    .footer { text-align:center; margin-top:30px; font-size:14px; color:#666; }
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto; background:#f6f7fb; margin:0}
+    .wrap{max-width:900px; margin:24px auto; background:#fff; padding:16px 18px; border-radius:14px; box-shadow:0 6px 28px rgba(0,0,0,.06)}
+    h1{font-size:20px; margin:6px 0 14px}
+    .row{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+    input, button{font-size:16px; padding:10px 12px; border:1px solid #ddd; border-radius:10px}
+    input[type=text]{flex:1; min-width:240px}
+    button{background:#2563eb; color:#fff; border:none; cursor:pointer}
+    button:hover{opacity:.92}
+    .tabs{display:flex; gap:10px; margin:8px 0 14px}
+    .tabs label{display:flex; gap:6px; align-items:center; cursor:pointer; padding:6px 10px; border:1px solid #e5e7eb; border-radius:10px}
+    .card{background:#fbfbfe; border:1px solid #eee; padding:12px; border-radius:10px; margin-top:14px; min-height:64px}
   </style>
 </head>
 <body>
+  <div class="wrap">
+    <h1>Bassam — الذكي • بحث عربي + رياضيات</h1>
 
-  <h1>Bassam الذكي – بحث عربي + تلخيص + أسعار + صور + PDF</h1>
+    <form method="post" action="/">
+      <div class="row">
+        <input type="text" name="q" placeholder="اكتب سؤالك… مثال: مشتق x**3" value="{{ q or '' }}">
+        <button type="submit">إرسال</button>
+      </div>
 
-  <form method="post" action="/" enctype="application/x-www-form-urlencoded">
-    <input type="text" name="q" placeholder="اكتب سؤالك هنا..." required>
-    <br><br>
-    <label><input type="radio" name="mode" value="summary" checked> تلخيص ذكي</label>
-    <label><input type="radio" name="mode" value="prices"> أسعار المتاجر</label>
-    <label><input type="radio" name="mode" value="images"> صور</label>
-    <br><br>
-    <button type="submit">بحث</button>
-  </form>
+      <div class="tabs">
+        <label><input type="radio" name="mode" value="ذكاء" {% if mode=='ذكاء' %}checked{% endif %}> ذكاء</label>
+        <label><input type="radio" name="mode" value="رياضيات" {% if mode=='رياضيات' %}checked{% endif %}> رياضيات</label>
+        <label><input type="radio" name="mode" value="بحث عربي" {% if mode=='بحث عربي' %}checked{% endif %}> بحث عربي</label>
+      </div>
+    </form>
 
-  {% if result %}
-    <div class="result">
-      <h3>نص النتيجة:</h3>
-      <p>{{ result|safe }}</p>
-      <form method="post" action="/download_pdf">
-        <input type="hidden" name="content" value="{{ result|safe }}">
-        <button type="submit">تنزيل PDF</button>
-      </form>
+    <div class="card">
+      {% if result %}
+        {{ result|safe }}
+      {% else %}
+        <div>النتيجة ستظهر هنا.</div>
+      {% endif %}
     </div>
-  {% endif %}
 
-  <div class="footer">
-    © Bassam الذكي — يعمل بـ FastAPI
+    <div style="margin-top:10px; font-size:12px; color:#666">يعمل بـ FastAPI • نسخة مصغّرة</div>
   </div>
-
 </body>
 </html>
