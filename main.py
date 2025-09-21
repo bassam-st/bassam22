@@ -1,169 +1,113 @@
 # -*- coding: utf-8 -*-
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+# Bassam – Math AI (Arabic) using FastAPI + SymPy
 
+from fastapi import FastAPI, Form
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import re
 
-# ====== Sympy (رياضيات رمزية) ======
+# SymPy
 from sympy import (
-    symbols, Eq, sympify, sin, cos, tan, log, sqrt, pi, E,
-    diff, integrate, simplify, solveset, S
+    symbols, sympify, simplify, diff, integrate, Eq, S, solveset, sin, cos, tan,
+    sqrt, pi, E
 )
 
-app = FastAPI()
+app = FastAPI(title="Bassam – Math AI (Arabic)")
 
-# استخدم مجلد العمل الحالي كقالب (لدعم index.html الموجود في الجذر)
-templates = Jinja2Templates(directory=".")
+# للسماح بالطلبات من أي متصفح
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
+)
 
-# رموز افتراضية للاستخدام إن لم يحدد المستخدم المتغير
-x, y, z = symbols('x y z')
+# الصفحة الرئيسية: تعيد index.html الموجود بجذر المشروع
+@app.get("/")
+def home():
+    return FileResponse("index.html")
 
-# دوال/ثوابت نسمح بها داخل sympify
-SAFE_LOCALS = {
-    "x": x, "y": y, "z": z,
-    "sin": sin, "cos": cos, "tan": tan,
-    "log": log, "sqrt": sqrt, "pi": pi, "E": E
-}
+# أدوات مساعدة
+_AR_DIFF      = re.compile(r"^\s*تفاضل[:\s]+(.+?)(?:\s+(?:بالنسبة\s*إ?لى|عن)\s+([a-zA-Z]))?\s*$")
+_AR_INTEG     = re.compile(r"^\s*تكامل[:\s]+(.+?)(?:\s+(?:بالنسبة\s*إ?لى|عن)\s+([a-zA-Z]))?\s*$")
+_AR_SIMPLIFY  = re.compile(r"^\s*تبسيط[:\s]+(.+?)\s*$")
+_AR_SOLVE     = re.compile(r"^\s*حل[:\s]+(.+?)\s*$")
 
+# سمِح ببعض الرموز/الدوال الآمنة
+def _allowed_locals():
+    x, y, z, t, a, b, c = symbols("x y z t a b c")
+    return {
+        "x": x, "y": y, "z": z, "t": t, "a": a, "b": b, "c": c,
+        "sin": sin, "cos": cos, "tan": tan, "sqrt": sqrt,
+        "pi": pi, "e": E
+    }
 
-def _pick_var(q: str):
-    """
-    يحاول استنتاج المتغير المطلوب التفاضل/التكامل بالنسبة له.
-    أمثلة: 'بالنسبة ل x' ، 'بالنسبة إلى س'
-    الافتراضي: x
-    """
-    # ابحث عن صيغة عربية أو إنجليزية
-    m = re.search(r"بالنسبة\s+(?:ل|إلى)\s*([a-zA-Zسصقفكلمنهوي])", q)
+def _symp(expr_text: str):
+    # استبدال ^ بـ ** ودعم الفاصلة العربية
+    expr_text = expr_text.replace("^", "**").replace("،", ",")
+    return sympify(expr_text, locals=_allowed_locals())
+
+def solve_math_ar(query: str) -> str:
+    q = query.strip()
+
+    # 1) أوامر عربية صريحة
+    m = _AR_DIFF.match(q)
     if m:
-        v = m.group(1)
-        # إذا كتب س بالعربية اعتبرها x
-        if v in ["س", "x", "X"]:
-            return x
-        if v in ["ص", "y", "Y"]:
-            return y
-        if v in ["ز", "z", "Z"]:
-            return z
-    # ابحث إن ذكر المستخدم مباشرة حرف متغير شائع
-    for v in ["x", "y", "z", "س", "ص", "ز"]:
-        if re.search(rf"\b{v}\b", q):
-            return {"x": x, "y": y, "z": z, "س": x, "ص": y, "ز": z}[v]
-    return x
+        expr = _symp(m.group(1))
+        var  = symbols(m.group(2)) if m.group(2) else symbols("x")
+        res  = diff(expr, var)
+        return f"تفاضل {expr} بالنسبة إلى {var} = {res}"
 
+    m = _AR_INTEG.match(q)
+    if m:
+        expr = _symp(m.group(1))
+        var  = symbols(m.group(2)) if m.group(2) else symbols("x")
+        res  = integrate(expr, var)
+        return f"تكامل {expr} بالنسبة إلى {var} = {res}"
 
-def solve_math(q: str) -> str | None:
-    """
-    يحاول فهم السؤال كمسألة رياضيّة ويعيد نتيجة عربية.
-    يعيد None إن لم يتعرف على أنها مسألة رياضية.
-    """
-    txt = q.strip()
-    low = txt.lower()
+    m = _AR_SIMPLIFY.match(q)
+    if m:
+        expr = _symp(m.group(1))
+        res  = simplify(expr)
+        return f"تبسيط {expr} = {res}"
 
-    # الكلمات المفتاحية
-    is_diff = any(k in txt for k in ["مشتق", "تفاضل", "اشتق"])
-    is_intg = "تكامل" in txt
-    is_simplify = any(k in txt for k in ["يبسط", "تبسيط", "بسّط"])
-    is_solve = ("حل" in txt and "معادلة" in txt) or ("=" in txt)
+    m = _AR_SOLVE.match(q)
+    if m:
+        text = m.group(1)
+        # إذا كان فيه مساواة نستعملها، وإلا نفترض = 0
+        if "=" in text:
+            left, right = text.split("=", 1)
+            left_s, right_s = _symp(left), _symp(right)
+            eq = Eq(left_s, right_s)
+        else:
+            eq = Eq(_symp(text), 0)
 
-    # استخرج التعبير بعد الكلمة المفتاحية إن وُجد
-    def after(word):
-        i = txt.find(word)
-        if i == -1:
-            return None
-        return txt[i+len(word):].strip()
+        # نحاول تحديد المتغيّر تلقائياً (الأكثر شيوعاً)
+        for v in ["x", "y", "z", "t", "a", "b", "c"]:
+            var = _allowed_locals()[v]
+            sol = solveset(eq, var, domain=S.Complexes)
+            if sol is not S.EmptySet:
+                return f"حل {eq} بالنسبة إلى {var}: {sol}"
+        # fallback عام
+        return f"الحل: {solveset(eq, domain=S.Complexes)}"
 
+    # 2) صيغة SymPy مباشرة: diff(), integrate(), solve(), simplify()
     try:
-        if is_diff:
-            expr_str = after("مشتق") or after("تفاضل") or after("اشتق")
-            if not expr_str:
-                expr_str = txt
-            var = _pick_var(txt)
-            expr = sympify(expr_str, locals=SAFE_LOCALS)
-            res = diff(expr, var)
-            return f"المشتقة بالنسبة إلى {var}:\n{res}"
-
-        if is_intg:
-            expr_str = after("تكامل") or txt
-            var = _pick_var(txt)
-            expr = sympify(expr_str, locals=SAFE_LOCALS)
-            res = integrate(expr, var)
-            return f"التكامل بالنسبة إلى {var}:\n{res}"
-
-        if is_simplify:
-            expr_str = after("يبسط") or after("تبسيط") or txt
-            expr = sympify(expr_str, locals=SAFE_LOCALS)
-            res = simplify(expr)
-            return f"تبسيط التعبير:\n{res}"
-
-        if is_solve:
-            # صيغة معادلة: إما ذكر 'حل معادلة' أو وجود علامة '='
-            if "=" in txt:
-                left, right = txt.split("=", 1)
-                left = sympify(left, locals=SAFE_LOCALS)
-                right = sympify(right, locals=SAFE_LOCALS)
-                var = _pick_var(txt)
-                sol = solveset(Eq(left, right), var, domain=S.Complexes)
-                return f"حل المعادلة بالنسبة إلى {var}:\n{sol}"
-            else:
-                # مثلاً: "حل معادلة x**2 - 4"
-                expr_str = after("حل") or txt
-                expr = sympify(expr_str, locals=SAFE_LOCALS)
-                var = _pick_var(txt)
-                sol = solveset(Eq(expr, 0), var, domain=S.Complexes)
-                return f"الجذور (حل {expr_str}=0) بالنسبة إلى {var}:\n{sol}"
-
-        # إن لم تُذكر كلمات خاصة: جرّب تقييم عددي مباشر
-        if any(ch in low for ch in list("0123456789xyzسصز+-*/^().")):
-            expr = sympify(txt, locals=SAFE_LOCALS)
-            num = expr.evalf()
-            return f"القيمة العددية:\n{num}"
-
+        expr = _symp(q)
+        # لو كانت نتيجة عددية بسيطة، اعرضها أيضاً بشكل عشري إذا أمكن
+        try:
+            return f"النتيجة: {expr} ≈ {expr.evalf()}"
+        except Exception:
+            return f"النتيجة: {expr}"
     except Exception as e:
-        return f"لم أفهم صيغة المسألة جيدًا. جرّب مثلاً:\n" \
-               f"- مشتق sin(x)*cos(x)\n" \
-               f"- تكامل x**2 بالنسبة ل x\n" \
-               f"- حل معادلة x**2 = 9\n" \
-               f"- بسّط (x**2 - 1)/(x-1)\n\n" \
-               f"تفاصيل فنية: {e}"
+        return f"تعذر فهم الصيغة. جرّب أمثلة مثل:\n" \
+               f"تفاضل: x^2 بالنسبة إلى x\n" \
+               f"تكامل: sin(x) بالنسبة إلى x\n" \
+               f"حل: x^2 - 4 = 0\n" \
+               f"تبسيط: (x^2 + 2*x + 1)\n" \
+               f"أو استخدم صيغة SymPy مثل: diff(x^3, x)"
 
-    # ليس مسألة رياضيّة على الأرجح
-    return None
-
-
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    # يعرض الصفحة فقط
-    return templates.TemplateResponse(
-        "index.html",
-        {"request": request, "result": "", "mode": "رياضيات"}
-    )
-
-
-@app.post("/", response_class=HTMLResponse)
-async def handle_form(
-    request: Request,
-    q: str = Form(...),
-    mode: str = Form("تلخيص ذكي")  # الحقل موجود في صفحتك، لكن سنركّز على الرياضيات هنا
-):
-    # 1) جرّب كرياضيات أولاً
-    math_ans = solve_math(q)
-    if math_ans:
-        return templates.TemplateResponse(
-            "index.html",
-            {"request": request, "result": math_ans, "mode": "رياضيات", "q": q}
-        )
-
-    # 2) إن لم تكن رياضيات، أعِد رسالة إرشادية (بدون بحث ويب)
-    msg = (
-        "اسألني مسألة رياضيّة وسأحلّها رمزيًا.\n"
-        "أمثلة:\n"
-        "- مشتق sin(x)*cos(x)\n"
-        "- تكامل (x**2 + 3*x) بالنسبة ل x\n"
-        "- حل معادلة x**2 = 9\n"
-        "- بسّط (x**2 - 1)/(x-1)\n"
-        "- 2 + 3*4 + sqrt(16)"
-    )
-    return templates.TemplateResponse(
-        "index.html",
-        {"request": request, "result": msg, "mode": "إرشاد", "q": q}
-    )
+# واجهة API تتلقى q من النموذج وتعيد JSON
+@app.post("/")
+async def api_solve(q: str = Form(...)):
+    result = solve_math_ar(q)
+    return JSONResponse({"result": result})
