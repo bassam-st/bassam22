@@ -4,7 +4,7 @@ jinja2
 httpx
 beautifulsoup4
 python-multipart
-duckduckgo-search
+duckduckgo-search==4.9.6
 readability-lxml
 sumy
 rank-bm25
@@ -13,3 +13,4 @@ numpy
 diskcache
 fpdf
 requests
+deep-translator==1.11.4
