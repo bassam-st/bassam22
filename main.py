@@ -1,199 +1,143 @@
-# main.py — Bassam الذكي: تلخيص + أسعار + صور + PDF
-from fastapi import FastAPI, Request, Form, Response
-from fastapi.responses import HTMLResponse
+# main.py — Bassam الذكي (بحث عربي + تلخيص + أسعار + صور + PDF) مع إجبار العربية بالترجمة
+from fastapi import FastAPI, Form, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
 
-from duckduckgo_search import DDGS
-import re
+from html import escape
+from bs4 import BeautifulSoup
+from readability import Document
+from diskcache import Cache
+from urllib.parse import urlparse
 from fpdf import FPDF
+from deep_translator import GoogleTranslator
 
-app = FastAPI(title="Bassam الذكي", version="1.0")
+import requests, re, html, time
 
-# ربط static + القوالب
+# ---- بحث DuckDuckGo
+from duckduckgo_search import ddg
+
+# تطبيق FastAPI
+app = FastAPI(title="Bassam الذكي", version="1.3")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ربط static + templates + كاش
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+cache = Cache(".cache")
 
-# ========= أدوات مساعدة =========
-MARKET_SITES = [
-    "aliexpress.com", "amazon.com", "amazon.sa", "amazon.ae", "amazon.eg",
-    "noon.com", "ebay.com", "alibaba.com", "temu.com", "made-in-china.com",
-]
-
-def ddg_text(query: str, max_results: int = 12):
-    items = []
-    with DDGS() as dd:
-        for r in dd.text(keywords=query, region="xa-ar", safesearch="moderate", max_results=max_results):
-            items.append(r)  # dict: title, href, body
-    return items
-
-def ddg_images(query: str, max_results: int = 20):
-    items = []
-    with DDGS() as dd:
-        for r in dd.images(keywords=query, region="xa-ar", safesearch="off", max_results=max_results):
-            items.append(r)  # dict: image, title, url
-    return items
-
-PRICE_RE = re.compile(r"(?i)(US?\$|USD|EUR|GBP|AED|SAR|EGP|QAR|KWD|OMR|د\.إ|ر\.س|ج\.م|د\.ك|ر\.ق|ر\.ع)\s*[\d\.,]+")
-AR_NUM = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
-
-# ========= الصفحات =========
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    return templates.TemplateResponse(
-        "index.html",
-        {"request": request, "q": "", "mode": "summary", "answer_text": "", "result_panel": ""}
-    )
-
-@app.post("/", response_class=HTMLResponse)
-async def run(request: Request, question: str = Form(...), mode: str = Form("summary")):
-    q = (question or "").strip()
-    if not q:
-        return templates.TemplateResponse("index.html", {"request": request, "q": "", "mode": mode, "answer_text": "", "result_panel": ""})
-
-    if mode == "prices":
-        panel, answer = handle_prices(q)
-    elif mode == "images":
-        panel, answer = handle_images(q)
-    else:
-        panel, answer = handle_summary(q)
-
-    return templates.TemplateResponse(
-        "index.html",
-        {"request": request, "q": q, "mode": mode, "answer_text": answer, "result_panel": panel}
-    )
-
-# لقبول HEAD على /
-@app.head("/")
-async def head_root():
-    return Response(status_code=204)
-
+# صحة
 @app.get("/healthz")
-async def healthz():
+def healthz():
     return {"status": "ok"}
 
-from datetime import datetime
-@app.get("/time")
-async def time_now():
-    return {"time": datetime.utcnow().isoformat()}
+# ---------------- إعدادات ----------------
+PREFERRED_AR_DOMAINS = {
+    "ar.wikipedia.org", "ar.m.wikipedia.org", "mawdoo3.com",
+    "almrsal.com", "sasapost.com", "arabic.cnn.com", "bbcarabic.com",
+    "aljazeera.net", "ar.wikihow.com"
+}
+MARKET_SITES = [
+    "alibaba.com", "1688.com", "aliexpress.com",
+    "amazon.com", "amazon.ae", "amazon.sa", "amazon.eg",
+    "noon.com", "jumia.com", "jumia.com.eg",
+    "ebay.com", "made-in-china.com", "temu.com", "souq.com"
+]
+HDRS = {
+    "User-Agent": "Mozilla/5.0 (compatible; BassamBot/1.3)",
+    "Accept-Language": "ar,en;q=0.8"
+}
 
-# ========= منطق التلخيص =========
-def handle_summary(q: str):
-    # نحاول بالعربية أولاً ثم نرجع إنجليزي لو قليل النتائج
-    results = ddg_text(q + " بالعربية", max_results=12)
-    if not results:
-        results = ddg_text(q, max_results=8)
+# -------- أدوات اللغة والملخص --------
+AR_RE = re.compile(r"[اأإآء-ي]")
 
-    picked = []
-    for r in results:
-        title = r.get("title") or ""
-        body = (r.get("body") or "").strip()
-        href = r.get("href") or ""
-        if not body:
-            continue
-        # نأخذ 2-3 جمل قصيرة
-        snippet = " ".join(body.split()[:40])
-        picked.append((title, snippet, href))
-        if len(picked) >= 3:
-            break
+def is_arabic(text: str, min_ar_chars: int = 12) -> bool:
+    return len(AR_RE.findall(text or "")) >= min_ar_chars
 
-    if not picked:
-        panel = '<div class="card" style="margin-top:12px;">لم أعثر على نصوص مناسبة. جرّب صياغة أخرى.</div>'
-        return panel, "لا توجد بيانات."
-
-    answer_text = "ملخص:\n" + "\n".join([f"- {t} — {s}" for t, s, _ in picked])
-
-    cards = []
-    for (t, s, u) in picked:
-        cards.append(
-            f'<div class="card" style="margin-top:10px">'
-            f'<strong>{t}</strong>'
-            f'<div class="summary" style="margin-top:8px">{s}</div>'
-            f'<div style="margin-top:8px"><a target="_blank" href="{u}">فتح المصدر</a></div>'
-            f'</div>'
-        )
-    panel = f'<div style="margin-top:18px"><h3>الملخص (من النتائج):</h3>{"".join(cards)}</div>'
-    return panel, answer_text
-
-# ========= منطق الأسعار =========
-def handle_prices(q: str):
-    site_filter = " OR ".join([f"site:{s}" for s in MARKET_SITES])
-    results = ddg_text(f"{q} {site_filter}", max_results=20)
-
-    seen = set()
-    cards, lines = [], []
-    for r in results:
-        url = r.get("href") or ""
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        title = r.get("title") or url
-        snippet = (r.get("body") or "").translate(AR_NUM)
-        m = PRICE_RE.search(snippet or "")
-        price = m.group(0) if m else ""
-        price_html = f"<div><strong>السعر:</strong> {price}</div>" if price else "<div>السعر غير واضح — افتح الرابط للتأكد.</div>"
-        cards.append(
-            f'<div class="card" style="margin-top:10px">'
-            f'<strong>{title}</strong>{price_html}'
-            f'<div style="margin-top:8px"><a target="_blank" href="{url}">فتح المصدر</a></div>'
-            f'</div>'
-        )
-        lines.append(f"- {title} | {price or '—'} | {url}")
-        if len(cards) >= 8:
-            break
-
-    if not cards:
-        panel = '<div class="card" style="margin-top:12px;">لم أجد نتائج أسعار مناسبة. جرّب اسم موديل أدق أو متجر معين.</div>'
-        return panel, "لا توجد بيانات."
-
-    panel = f'<div style="margin-top:18px;"><h3>نتائج أسعار عن: {q}</h3>{"".join(cards)}</div>'
-    answer = "نتائج أسعار:\n" + "\n".join(lines)
-    return panel, answer
-
-# ========= منطق الصور =========
-def handle_images(q: str):
-    items = ddg_images(q, max_results=16)
-    if not items:
-        panel = '<div class="card" style="margin-top:12px;">لم أجد صورًا مناسبة.</div>'
-        return panel, ""
-
-    cards = []
-    for it in items[:16]:
-        img = it.get("image")
-        src = it.get("url") or img
-        if img:
-            cards.append(f'<div class="imgcard"><a href="{src}" target="_blank"><img src="{img}" alt=""/></a></div>')
-    panel = f'<div style="margin-top:18px;"><h3>نتائج صور عن: {q}</h3><div class="imggrid">{"".join(cards)}</div></div>'
-    return panel, ""
-
-# ========= تصدير PDF بسيط =========
-@app.get("/export_pdf")
-def export_pdf(q: str, mode: str = "summary"):
-    # نعيد تشغيل المنطق لنفس السؤال لإخراج نص
-    if mode == "prices":
-        _, text = handle_prices(q)
-        title = f"بحث أسعار: {q}"
-    elif mode == "images":
-        _, text = handle_images(q)
-        title = f"نتائج صور: {q}"
+def to_ar(text: str) -> str:
+    """ترجمة تلقائية إلى العربية إن لم يكن النص عربياً."""
+    try:
         if not text:
-            text = "يرجى فتح الموقع لمعاينة الصور والروابط."
-    else:
-        _, text = handle_summary(q)
-        title = f"ملخص البحث: {q}"
+            return ""
+        if is_arabic(text, 6):
+            return text
+        return GoogleTranslator(source="auto", target="ar").translate(text)
+    except Exception:
+        return text or ""
 
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=14)
-    pdf.multi_cell(0, 10, title)
-    pdf.ln(4)
-    pdf.set_font("Arial", size=12)
-    for line in (text or "").split("\n"):
-        pdf.multi_cell(0, 8, line)
+STOP = set("""من في على إلى عن أن إن بأن كان تكون يكون التي الذي الذين هذا هذه ذلك هناك ثم حيث كما اذا إذا أو و يا ما مع قد لم لن بين لدى لدى، عند بعد قبل دون غير حتى كل أي كيف لماذا متى هل الى ال""".split())
 
-    data = pdf.output(dest="S").encode("latin1", "ignore")
-    headers = {
-        "Content-Disposition": 'attachment; filename="bassam_ai.pdf"',
-        "Content-Type": "application/pdf",
-    }
-    return Response(content=data, headers=headers)
+def tokenize(s: str):
+    s = re.sub(r"[^\w\s\u0600-\u06FF]+", " ", s.lower())
+    toks = [t for t in s.split() if t and t not in STOP]
+    return toks
+
+def score_sentences(text: str, query: str):
+    sentences = re.split(r'(?<=[\.\!\?\؟])\s+|\n+', text or "")
+    q_terms = set(tokenize(query))
+    scored = []
+    for s in sentences:
+        s2 = s.strip()
+        if len(s2) < 25:
+            continue
+        terms = set(tokenize(s2))
+        inter = q_terms & terms
+        score = len(inter) + (len(s2) >= 80)
+        if score > 0:
+            scored.append((score, s2))
+    scored.sort(reverse=True, key=lambda x: x[0])
+    return [s for _, s in scored[:8]]
+
+def summarize_from_text(text: str, query: str, max_sentences=3):
+    sents = score_sentences(text, query)
+    joined = " ".join(sents[:max_sentences]) if sents else ""
+    return to_ar(joined)  # إجبار العربية
+
+def domain_of(url: str):
+    try:
+        return urlparse(url).netloc.lower()
+    except:
+        return url
+
+# -------- تعلم ذاتي بسيط للنطاقات --------
+def get_scores():
+    return cache.get("domain_scores", {}) or {}
+
+def save_scores(scores):
+    cache.set("domain_scores", scores, expire=0)
+
+def bump_score(domain: str, delta: int):
+    if not domain:
+        return
+    scores = get_scores()
+    scores[domain] = scores.get(domain, 0) + delta
+    save_scores(scores)
+
+# -------- جلب الصفحات --------
+def fetch(url: str, timeout=6):
+    r = requests.get(url, headers=HDRS, timeout=timeout)
+    r.raise_for_status()
+    return r.text
+
+def fetch_and_extract(url: str, timeout=6):
+    try:
+        html_text = fetch(url, timeout=timeout)
+        doc = Document(html_text)
+        content_html = doc.summary()
+        soup = BeautifulSoup(content_html, "html.parser")
+        text = soup.get_text(separator="\n")
+        return html.unescape(text), html_text
+    except Exception:
+        return "", ""
+
+# -------- استخراج الأسعار --------
+PRICE_RE = re.compile(r"(?i)(US?\s*\$|USD|EUR|GBP|AED|SAR|EGP|QAR|KWD|OMR|د\.إ|ر\.س|
