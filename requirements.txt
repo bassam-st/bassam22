@@ -6,11 +6,8 @@ beautifulsoup4
 python-multipart
 duckduckgo-search
 readability-lxml
-sumy
-rank-bm25
-rapidfuzz
 numpy
 diskcache
 fpdf
 requests
-googletrans==4.0.0-rc1
+deep-translator
