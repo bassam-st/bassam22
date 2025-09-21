@@ -4,7 +4,7 @@ jinja2
 httpx
 beautifulsoup4
 python-multipart
-duckduckgo-search
+ddgs
 readability-lxml
 numpy
 diskcache
