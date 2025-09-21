@@ -1,113 +1,118 @@
-# -*- coding: utf-8 -*-
-# Bassam – Math AI (Arabic) using FastAPI + SymPy
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
-from fastapi import FastAPI, Form
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-import re
+# رياضيات
+from sympy import symbols, sympify, diff, integrate, simplify
+# بحث (الحزمة الجديدة)
+from ddgs import DDGS
 
-# SymPy
-from sympy import (
-    symbols, sympify, simplify, diff, integrate, Eq, S, solveset, sin, cos, tan,
-    sqrt, pi, E
-)
+app = FastAPI()
 
-app = FastAPI(title="Bassam – Math AI (Arabic)")
+# static + templates
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
-# للسماح بالطلبات من أي متصفح
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
-)
-
-# الصفحة الرئيسية: تعيد index.html الموجود بجذر المشروع
-@app.get("/")
-def home():
-    return FileResponse("index.html")
-
-# أدوات مساعدة
-_AR_DIFF      = re.compile(r"^\s*تفاضل[:\s]+(.+?)(?:\s+(?:بالنسبة\s*إ?لى|عن)\s+([a-zA-Z]))?\s*$")
-_AR_INTEG     = re.compile(r"^\s*تكامل[:\s]+(.+?)(?:\s+(?:بالنسبة\s*إ?لى|عن)\s+([a-zA-Z]))?\s*$")
-_AR_SIMPLIFY  = re.compile(r"^\s*تبسيط[:\s]+(.+?)\s*$")
-_AR_SOLVE     = re.compile(r"^\s*حل[:\s]+(.+?)\s*$")
-
-# سمِح ببعض الرموز/الدوال الآمنة
-def _allowed_locals():
-    x, y, z, t, a, b, c = symbols("x y z t a b c")
-    return {
-        "x": x, "y": y, "z": z, "t": t, "a": a, "b": b, "c": c,
-        "sin": sin, "cos": cos, "tan": tan, "sqrt": sqrt,
-        "pi": pi, "e": E
-    }
-
-def _symp(expr_text: str):
-    # استبدال ^ بـ ** ودعم الفاصلة العربية
-    expr_text = expr_text.replace("^", "**").replace("،", ",")
-    return sympify(expr_text, locals=_allowed_locals())
-
-def solve_math_ar(query: str) -> str:
-    q = query.strip()
-
-    # 1) أوامر عربية صريحة
-    m = _AR_DIFF.match(q)
-    if m:
-        expr = _symp(m.group(1))
-        var  = symbols(m.group(2)) if m.group(2) else symbols("x")
-        res  = diff(expr, var)
-        return f"تفاضل {expr} بالنسبة إلى {var} = {res}"
-
-    m = _AR_INTEG.match(q)
-    if m:
-        expr = _symp(m.group(1))
-        var  = symbols(m.group(2)) if m.group(2) else symbols("x")
-        res  = integrate(expr, var)
-        return f"تكامل {expr} بالنسبة إلى {var} = {res}"
-
-    m = _AR_SIMPLIFY.match(q)
-    if m:
-        expr = _symp(m.group(1))
-        res  = simplify(expr)
-        return f"تبسيط {expr} = {res}"
-
-    m = _AR_SOLVE.match(q)
-    if m:
-        text = m.group(1)
-        # إذا كان فيه مساواة نستعملها، وإلا نفترض = 0
-        if "=" in text:
-            left, right = text.split("=", 1)
-            left_s, right_s = _symp(left), _symp(right)
-            eq = Eq(left_s, right_s)
-        else:
-            eq = Eq(_symp(text), 0)
-
-        # نحاول تحديد المتغيّر تلقائياً (الأكثر شيوعاً)
-        for v in ["x", "y", "z", "t", "a", "b", "c"]:
-            var = _allowed_locals()[v]
-            sol = solveset(eq, var, domain=S.Complexes)
-            if sol is not S.EmptySet:
-                return f"حل {eq} بالنسبة إلى {var}: {sol}"
-        # fallback عام
-        return f"الحل: {solveset(eq, domain=S.Complexes)}"
-
-    # 2) صيغة SymPy مباشرة: diff(), integrate(), solve(), simplify()
+# --------- بحث عربي مبسّط ---------
+def ar_search(q: str, maxn: int = 6):
+    items = []
+    query = f"{q} بالعربية"
     try:
-        expr = _symp(q)
-        # لو كانت نتيجة عددية بسيطة، اعرضها أيضاً بشكل عشري إذا أمكن
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, region="sa-ar", safesearch="moderate", timelimit="y", max_results=maxn):
+                items.append({"title": r.get("title",""), "href": r.get("href",""), "body": r.get("body","")})
+    except Exception:
+        pass
+    if not items:
         try:
-            return f"النتيجة: {expr} ≈ {expr.evalf()}"
+            with DDGS() as ddgs:
+                for r in ddgs.text(query, max_results=maxn):
+                    items.append({"title": r.get("title",""), "href": r.get("href",""), "body": r.get("body","")})
         except Exception:
-            return f"النتيجة: {expr}"
-    except Exception as e:
-        return f"تعذر فهم الصيغة. جرّب أمثلة مثل:\n" \
-               f"تفاضل: x^2 بالنسبة إلى x\n" \
-               f"تكامل: sin(x) بالنسبة إلى x\n" \
-               f"حل: x^2 - 4 = 0\n" \
-               f"تبسيط: (x^2 + 2*x + 1)\n" \
-               f"أو استخدم صيغة SymPy مثل: diff(x^3, x)"
+            pass
+    return items
 
-# واجهة API تتلقى q من النموذج وتعيد JSON
-@app.post("/")
-async def api_solve(q: str = Form(...)):
-    result = solve_math_ar(q)
-    return JSONResponse({"result": result})
+# --------- حلول رياضيات أساسية ---------
+def solve_math(q: str) -> str:
+    """
+    أمثلة:
+    - مشتق x**3
+    - تكامل sin(x)
+    - بسّط (x+x)
+    """
+    x, y, z = symbols("x y z")
+    s = q.strip().replace("**", "^").replace("^", "**")
+
+    # تحديد العملية
+    op = None
+    if any(w in s for w in ["مشتق", "المشتقة", "اشتق", "deriv"]):
+        op = "diff"
+    elif any(w in s for w in ["تكامل", "integral", "integrate"]):
+        op = "integrate"
+    elif any(w in s for w in ["بسّط", "بسط", "simplify"]):
+        op = "simplify"
+
+    # أخذ التعبير بعد الكلمة المفتاحية إن وجدت
+    for key in ["مشتق", "المشتقة", "اشتق", "تكامل", "بسّط", "بسط"]:
+        if key in s:
+            s = s.split(key,1)[-1].strip(":،. ").strip()
+            break
+    if not s:
+        s = q
+
+    try:
+        expr = sympify(s)
+        if op == "diff":
+            return f"المشتقة بالنسبة لـ x: {diff(expr, x)}"
+        elif op == "integrate":
+            return f"التكامل بالنسبة لـ x: {integrate(expr, x)}"
+        elif op == "simplify":
+            return f"التبسيط: {simplify(expr)}"
+        else:
+            return f"تفسير سريع:\n• تبسيط: {simplify(expr)}\n• مشتقة (x): {diff(expr, x)}"
+    except Exception as e:
+        return f"تعذر فهم التعبير الرياضي. جرّب مثل: 'مشتق x**3' أو 'تكامل sin(x)'.\nالخطأ: {e}"
+
+# --------- الواجهات ---------
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse("index.html",
+                                      {"request": request, "result": "", "mode": "ذكاء", "q": ""})
+
+@app.post("/", response_class=HTMLResponse)
+async def ask(request: Request, q: str = Form(...), mode: str = Form("ذكاء")):
+    q = (q or "").strip()
+    if not q:
+        result = "اكتب سؤالك أولًا."
+    else:
+        if mode == "رياضيات":
+            result = solve_math(q)
+        elif mode == "بحث عربي":
+            items = ar_search(q, maxn=6)
+            if not items:
+                result = "لم أعثر على نتائج. جرّب صياغة أخرى."
+            else:
+                result = "\n".join(
+                    f"<p><strong>{it['title']}</strong><br>"
+                    f"<a href='{it['href']}' target='_blank'>{it['href']}</a><br>{it['body']}</p>"
+                    for it in items
+                )
+        else:
+            # ذكاء بسيط: تحية/توجيه، وإلا جرّب رياضيات ثم بحث
+            if any(w in q for w in ["السلام", "مرحبا", "هلا"]):
+                result = "هلا بك! اسأل رياضيات (مثال: مشتق x**3) أو اختر 'بحث عربي'."
+            else:
+                trial = solve_math(q)
+                if "تعذر" not in trial:
+                    result = trial
+                else:
+                    items = ar_search(q, maxn=4)
+                    if items:
+                        lines = "\n".join(f"<p><strong>{i['title']}</strong><br><a href='{i['href']}' target='_blank'>{i['href']}</a><br>{i['body']}</p>" for i in items)
+                        result = "لم أفهم السؤال كرياضيات — هذه نتائج بحث قد تساعدك:<br>" + lines
+                    else:
+                        result = "أحتاج توضيحًا أكثر، أو جرّب وضع 'بحث عربي'."
+
+    return templates.TemplateResponse("index.html",
+                                      {"request": request, "result": result, "mode": mode, "q": q})
