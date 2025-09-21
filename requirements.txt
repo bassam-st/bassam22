@@ -1,1 +1,15 @@
-duckduckgo-search==4.9.6
+fastapi
+uvicorn
+jinja2
+httpx
+beautifulsoup4
+python-multipart
+duckduckgo-search
+readability-lxml
+sumy
+rank-bm25
+rapidfuzz
+numpy
+diskcache
+fpdf
+requests
