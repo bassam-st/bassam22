@@ -6,7 +6,7 @@ from fastapi.templating import Jinja2Templates
 # رياضيات
 from sympy import symbols, sympify, diff, integrate, simplify
 # بحث (الحزمة الجديدة)
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 
 app = FastAPI()
 
