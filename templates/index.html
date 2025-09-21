@@ -1,66 +1,47 @@
-<!-- templates/index.html -->
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Bassam الذكي — بحث + تلخيص + أسعار + صور</title>
+  <meta charset="UTF-8">
+  <title>Bassam الذكي – بحث عربي + تلخيص + أسعار + صور + PDF</title>
   <style>
-    body{font-family:system-ui,Segoe UI,Tahoma,Arial; background:#f7f7f9; color:#111; margin:0}
-    header{background:#0d6efd;color:#fff;padding:14px 18px}
-    .wrap{max-width:880px;margin:18px auto;padding:0 12px}
-    form.card{background:#fff;border:1px solid #e6e6ea;border-radius:14px;padding:14px}
-    .row{display:flex;gap:8px;flex-wrap:wrap}
-    input[type=text]{flex:1;min-width:220px;padding:10px 12px;border:1px solid #d0d0d7;border-radius:10px}
-    button, .btn-mini{background:#0d6efd;color:#fff;border:0;border-radius:10px;padding:10px 14px;cursor:pointer}
-    .btn-silent{background:#e9ecef;color:#111}
-    .card{background:#fff;border:1px solid #e6e6ea;border-radius:14px;padding:12px}
-    .summary{background:#f1f4ff;border:1px dashed #90a8ff;border-radius:10px;padding:10px;margin-top:6px;line-height:1.8}
-    .imggrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
-    .imgcard{border:1px solid #e6e6ea;border-radius:10px;overflow:hidden;background:#fff}
-    .imgcard img{width:100%;display:block}
-    .fb{margin-top:8px;display:flex;gap:6px}
-    footer{color:#666;text-align:center;margin:22px 0}
+    body { font-family: Tahoma, Arial, sans-serif; margin:20px; background:#f5f5f5; }
+    h1 { color:#0056b3; text-align:center; }
+    form { text-align:center; margin-bottom:20px; }
+    input[type=text] { width:60%; padding:10px; font-size:16px; }
+    button { padding:10px 20px; font-size:16px; background:#0056b3; color:white; border:none; cursor:pointer; }
+    button:hover { background:#003d80; }
+    .result { background:white; padding:15px; margin-top:15px; border-radius:8px; box-shadow:0 0 5px #aaa; }
+    .footer { text-align:center; margin-top:30px; font-size:14px; color:#666; }
   </style>
 </head>
 <body>
-  <header><div class="wrap"><strong>Bassam الذكي</strong> — بحث عربي + تلخيص + أسعار + صور + PDF</div></header>
-  <div class="wrap">
-    <form class="card" action="/" method="post">
-      <div class="row">
-        <input type="text" name="question" placeholder="اكتب سؤالك هنا… مثال: ما هو البيتومين؟ أو: سعر Galaxy S24 Ultra في الأسواق" value="{{ q or '' }}" />
-        <button type="submit">بحث</button>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <label><input type="radio" name="mode" value="summary" {% if mode=='summary' %}checked{% endif %}> تلخيص ذكي</label>
-        <label><input type="radio" name="mode" value="prices"  {% if mode=='prices'  %}checked{% endif %}> أسعار المتاجر</label>
-        <label><input type="radio" name="mode" value="images"  {% if mode=='images'  %}checked{% endif %}> صور</label>
-        {% if q %}
-        <a class="btn-silent" style="padding:8px 12px;border-radius:10px;text-decoration:none"
-           href="/export_pdf?q={{ q }}&mode={{ mode or 'summary' }}">⬇️ تنزيل PDF</a>
-        {% endif %}
-      </div>
-    </form>
 
-    {% if answer_text %}
-      <div class="card" style="margin-top:12px">
-        <strong>نص النتيجة:</strong>
-        <div class="summary" style="margin-top:8px; white-space:pre-wrap">{{ answer_text }}</div>
-      </div>
-    {% endif %}
+  <h1>Bassam الذكي – بحث عربي + تلخيص + أسعار + صور + PDF</h1>
 
-    {{ result_panel | safe }}
+  <form method="post" action="/" enctype="application/x-www-form-urlencoded">
+    <input type="text" name="q" placeholder="اكتب سؤالك هنا..." required>
+    <br><br>
+    <label><input type="radio" name="mode" value="summary" checked> تلخيص ذكي</label>
+    <label><input type="radio" name="mode" value="prices"> أسعار المتاجر</label>
+    <label><input type="radio" name="mode" value="images"> صور</label>
+    <br><br>
+    <button type="submit">بحث</button>
+  </form>
 
-    <footer>© Bassam الذكي — يعمل بـ FastAPI</footer>
+  {% if result %}
+    <div class="result">
+      <h3>نص النتيجة:</h3>
+      <p>{{ result|safe }}</p>
+      <form method="post" action="/download_pdf">
+        <input type="hidden" name="content" value="{{ result|safe }}">
+        <button type="submit">تنزيل PDF</button>
+      </form>
+    </div>
+  {% endif %}
+
+  <div class="footer">
+    © Bassam الذكي — يعمل بـ FastAPI
   </div>
 
-  <script>
-    async function sendFeedback(domain, delta){
-      try{
-        await fetch('/feedback', {method:'POST', body:new URLSearchParams({domain, delta})});
-        alert('شكراً لملاحظتك 👍');
-      }catch(e){ alert('تعذر الإرسال'); }
-    }
-  </script>
 </body>
 </html>
