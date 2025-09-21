@@ -1,6 +1,7 @@
-# main.py — بحث عربي مجاني + تلخيص ذكي + أسعار المتاجر + صور + تقييم + PDF + نسخ + وضع ليلي
-from fastapi import FastAPI, Form, Request, Response
+# main.py — بحث عربي + تلخيص + أسعار + صور + PDF
+from fastapi import FastAPI, Request, Query, Form, Response
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -15,12 +16,28 @@ from bs4 import BeautifulSoup
 from diskcache import Cache
 from urllib.parse import urlparse, urlencode
 from fpdf import FPDF
+from html import escape
 import requests, re, html, time
 
-app = FastAPI()
+app = FastAPI(title="Bassam App", version="1.0")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ربط مجلد static + قوالب Jinja
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 cache = Cache(".cache")
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
 
 # ---------------- إعدادات ----------------
 PREFERRED_AR_DOMAINS = {
@@ -29,14 +46,12 @@ PREFERRED_AR_DOMAINS = {
     "arabic.cnn.com", "bbcarabic.com", "aljazeera.net",
     "ar.wikihow.com", "moe.gov.sa", "yemen.gov.ye", "moh.gov.sa"
 }
-
 MARKET_SITES = [
     "alibaba.com", "1688.com", "aliexpress.com",
     "amazon.com", "amazon.ae", "amazon.sa", "amazon.eg",
     "noon.com", "jumia.com", "jumia.com.eg",
     "ebay.com", "made-in-china.com", "temu.com", "souq.com"
 ]
-
 HDRS = {
     "User-Agent": "Mozilla/5.0 (compatible; BassamBot/1.3)",
     "Accept-Language": "ar,en;q=0.8"
@@ -80,7 +95,7 @@ def domain_of(url: str):
     except:
         return url
 
-# -------- نقاط النطاقات (تعلم ذاتي بسيط) --------
+# -------- نقاط النطاقات --------
 def get_scores():
     return cache.get("domain_scores", {}) or {}
 
@@ -147,28 +162,41 @@ def priority_key(item, mode="summary"):
     d = domain_of(item.get("href") or item.get("link") or item.get("url") or "")
     base = 2
     if d in PREFERRED_AR_DOMAINS: base -= 1
-    if mode == "prices" and any(d.endswith(ms) or d==ms for ms in MARKET_SITES): base -= 0.5
+    if mode == "prices" and any(d.endswith(ms) or d == ms for ms in MARKET_SITES): base -= 0.5
     base -= 0.05 * scores.get(d, 0)
     return base
 
 # ---------------- المسارات ----------------
 @app.get("/", response_class=HTMLResponse)
-async def page(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "result_panel": "", "q": "", "mode": "summary", "answer_text": ""})
+def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+# مسار البحث البسيط (ينفّذ الفورم الموجود في index.html)
+@app.get("/search", response_class=HTMLResponse)
+def search(request: Request, q: str = Query("", description="كلمة البحث")):
+    result_html = f"""
+    <html lang="ar" dir="rtl">
+    <head><meta charset="utf-8"><title>نتيجة البحث</title></head>
+    <body style="font-family: system-ui; padding:20px">
+      <h2>🔎 نتيجة البحث:</h2>
+      <p>بحثت عن: <b>{escape(q)}</b></p>
+      <p><a href="/">⬅ العودة</a></p>
+    </body>
+    </html>
+    """
+    return HTMLResponse(result_html)
 
 @app.post("/", response_class=HTMLResponse)
 async def run(request: Request, question: str = Form(...), mode: str = Form("summary")):
     q = (question or "").strip()
     if not q:
         return templates.TemplateResponse("index.html", {"request": request, "result_panel": "", "q": "", "mode": mode, "answer_text": ""})
-
     if mode == "prices":
         panel, answer_text = await handle_prices(q, return_plain=True)
     elif mode == "images":
         panel, answer_text = await handle_images(q)
     else:
         panel, answer_text = await handle_summary(q, return_plain=True)
-
     return templates.TemplateResponse("index.html", {"request": request, "result_panel": panel, "q": q, "mode": mode, "answer_text": (answer_text or "")})
 
 @app.post("/feedback")
@@ -182,13 +210,11 @@ async def handle_summary(q: str, return_plain=False):
     cached = cache.get(cache_key)
     if cached and not return_plain:
         return cached, ""
-
     results = ddg(q + " بالعربية", region="xa-ar", safesearch="Moderate", max_results=12) or []
     if not results:
         results = ddg(q + " بالعربية", region="sa-ar", safesearch="Moderate", max_results=12) or []
     if not results:
         results = ddg(q, region="xa-ar", safesearch="Moderate", max_results=12) or []
-
     source_cards, combined_chunks = [], []
     for r in sorted(results, key=lambda it: priority_key(it, "summary")):
         href = r.get("href") or r.get("link") or r.get("url")
@@ -196,7 +222,6 @@ async def handle_summary(q: str, return_plain=False):
         if not href:
             continue
         d = domain_of(href)
-
         ckey = "url:" + href
         val = cache.get(ckey)
         if val is None:
@@ -205,14 +230,11 @@ async def handle_summary(q: str, return_plain=False):
                 cache.set(ckey, (txt, raw), expire=60*60*24)
             val = (txt, raw)
         page_text, _ = val
-
         if not page_text or not is_arabic(page_text):
             continue
-
         summ = summarize_from_text(page_text, q, max_sentences=3)
         if not summ:
             continue
-
         combined_chunks.append(summ)
         source_cards.append(make_summary_card(title, href, summ, d))
         if len(source_cards) >= 3:
@@ -269,12 +291,10 @@ async def handle_prices(q: str, return_plain=False):
     cached = cache.get(cache_key)
     if cached and not return_plain:
         return cached, ""
-
     sites_filter = " OR ".join([f"site:{s}" for s in MARKET_SITES])
     results = ddg(f'{q} {sites_filter}', region="xa-ar", safesearch="Off", max_results=20) or []
     if not results:
         results = ddg(q + " " + sites_filter, region="wt-wt", safesearch="Off", max_results=20) or []
-
     cards, seen = [], set()
     lines_for_pdf = []
     for r in sorted(results, key=lambda it: priority_key(it, "prices")):
@@ -285,7 +305,6 @@ async def handle_prices(q: str, return_plain=False):
             continue
         seen.add(url)
         d = domain_of(url)
-
         price = ""
         try:
             ckey = "purl:" + url
@@ -302,7 +321,6 @@ async def handle_prices(q: str, return_plain=False):
                     price = (meta_price.get("content") or meta_price.text or "").strip()
         except Exception:
             price = ""
-
         cards.append(make_price_card(title, url, price, snippet, d))
         lines_for_pdf.append(f"- {title} | {price or '—'} | {url}")
         if len(cards) >= 8:
@@ -336,7 +354,6 @@ async def handle_images(q: str):
     cached = cache.get(key)
     if cached:
         return cached, ""
-
     items = []
     try:
         if DDGS:
@@ -349,12 +366,10 @@ async def handle_images(q: str):
                 items.append({"title": r.get("title") or "", "image": None, "source": r.get("href") or r.get("url")})
     except Exception:
         items = []
-
     if not items:
         panel = '<div class="card" style="margin-top:12px;">لم أجد صورًا مناسبة. حاول تفاصيل أكثر أو كلمة "صور".</div>'
         cache.set(key, (panel, ""), expire=60*10)
         return panel, ""
-
     cards = []
     for it in items[:16]:
         img = it.get("image")
@@ -364,7 +379,6 @@ async def handle_images(q: str):
             cards.append(f'<div class="imgcard"><a href="{html.escape(src or img)}" target="_blank"><img src="{html.escape(img)}" alt=""/></a></div>')
         else:
             cards.append(f'<div class="card"><a href="{html.escape(src)}" target="_blank">{html.escape(title or "فتح المصدر")}</a></div>')
-
     panel = f'<div style="margin-top:18px;"><h3>نتائج صور عن: {html.escape(q)}</h3><div class="imggrid">{"".join(cards)}</div></div>'
     cache.set(key, (panel, ""), expire=60*20)
     return panel, ""
