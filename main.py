@@ -1,7 +1,12 @@
+# main.py — Bassam App v3.1 (psycopg3)
 from fastapi import FastAPI, Request, Form, Query
 from fastapi.responses import HTMLResponse, Response, FileResponse
-import httpx, re, ast, math, os, psycopg2, html, csv, io
+from fastapi.staticfiles import StaticFiles
+import httpx, re, ast, math, os, html, csv, io
 from datetime import datetime
+
+# قاعدة البيانات: psycopg3 (بديل psycopg2)
+import psycopg  # ← مهم: psycopg3
 
 # بحث جاهز بدون سكربنج HTML
 from duckduckgo_search import DDGS
@@ -10,34 +15,32 @@ from duckduckgo_search import DDGS
 from sympy import symbols, sympify, simplify, diff, integrate, sqrt, sin, cos, tan, solve, factor, expand, limit, oo, latex
 import sympy as sp
 
-# نظام الذكاء الاصطناعي
+# نظام الذكاء الاصطناعي (Gemini)
 try:
     from gemini import answer_with_ai, smart_math_help, is_gemini_available
     GEMINI_AVAILABLE = True
-except Exception as e:
-    # حتى لو كان هناك خطأ في ملف gemini.py، لا نوقف التطبيق
+except Exception:
     GEMINI_AVAILABLE = False
-    def answer_with_ai(question): return None
-    def smart_math_help(question): return None
-    def is_gemini_available(): return False
+    def answer_with_ai(question: str): return None
+    def smart_math_help(question: str): return None
+    def is_gemini_available() -> bool: return False
 
 # ==== إعدادات FastAPI ====
 app = FastAPI(title="Bassam App", version="3.1")
 
-# خدمة ملف Service Worker للـ PWA
+# خدمة ملفات PWA الضرورية
 @app.get("/service-worker.js")
-async def service_worker():
+async def get_service_worker():
     return FileResponse("service-worker.js", media_type="application/javascript")
 
-# خدمة ملف Manifest للـ PWA  
 @app.get("/manifest.json")
-async def manifest():
+async def get_manifest():
     return FileResponse("manifest.json", media_type="application/json")
 
-# ===================== قاعدة البيانات (PostgreSQL) =====================
+# ===================== قاعدة البيانات (PostgreSQL عبر psycopg3) =====================
 def get_db_connection():
-    # يتطلب وجود DATABASE_URL في بيئة Replit (يظهر لك في تبويب Database)
-    return psycopg2.connect(os.environ["DATABASE_URL"])
+    # يتطلب وجود DATABASE_URL في بيئة Render/Replit (مثال: postgres://user:pass@host:5432/db)
+    return psycopg.connect(os.environ["DATABASE_URL"])
 
 def init_db_pg():
     try:
@@ -46,10 +49,10 @@ def init_db_pg():
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS question_history(
                         id SERIAL PRIMARY KEY,
-                        question TEXT NOT NULL,
-                        answer   TEXT NOT NULL,
-                        mode     TEXT NOT NULL,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                        question   TEXT NOT NULL,
+                        answer     TEXT NOT NULL,
+                        mode       TEXT NOT NULL,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
                     );
                 """)
                 conn.commit()
@@ -58,7 +61,11 @@ def init_db_pg():
 
 @app.on_event("startup")
 def _startup():
-    init_db_pg()
+    # لا تجعل فشل قاعدة البيانات يوقف التطبيق
+    try:
+        init_db_pg()
+    except Exception as e:
+        print("startup init_db_pg error:", e)
 
 def save_question_history(question: str, answer: str, mode: str = "summary"):
     try:
@@ -133,7 +140,6 @@ def _analyze_expression(original: str, expr: str, final_result: float):
     import re
     step = 1
     current_expr = expr
-
     for pattern, func_name, func in [
         (r'sin\(([^)]+)\)','sin',lambda x: math.sin(math.radians(x))),
         (r'cos\(([^)]+)\)','cos',lambda x: math.cos(math.radians(x))),
@@ -148,7 +154,6 @@ def _analyze_expression(original: str, expr: str, final_result: float):
                 steps_html += f'<p><strong>{step}.</strong> {func_name}({v}) = <span style="color:#2196F3">{r:.4f}</span></p>'
                 current_expr = current_expr.replace(m.group(0), str(r)); step += 1
             except: pass
-
     steps_html += f'<hr><h4 style="color:#4facfe;text-align:center;">🎯 النتيجة: <span style="font-size:1.3em;">{final_result:.6g}</span></h4></div>'
     return steps_html
 
@@ -162,7 +167,7 @@ def try_calc_ar(question: str):
     try:
         res = _safe_eval(expr)
         return {"text": f"النتيجة النهائية: {res}", "html": _analyze_expression(question, expr, res)}
-    except: 
+    except:
         return None
 
 # ===================== 2) محولات وحدات =====================
@@ -221,7 +226,6 @@ def _sent_tokenize_ar(text: str):
     return [s for s in sents if len(s)>=20]
 
 def summarize_advanced(question: str, page_texts: list, max_final_sents=4):
-    # تبسيط: لو SUMY غير مثبتة، خذ أفضل الجُمل المتاحة فقط
     candidate_sents = []
     for t in page_texts:
         candidate_sents.extend(_sent_tokenize_ar(t)[:200])
@@ -233,105 +237,64 @@ def summarize_advanced(question: str, page_texts: list, max_final_sents=4):
         s = s.lower()
         s = re.sub(r"[^\w\s\u0600-\u06FF]+"," ", s)
         return s.split()
-    import numpy as np
     from rank_bm25 import BM25Okapi
     bm25 = BM25Okapi([tok(s) for s in candidate_sents])
+    import numpy as np
     idx = np.argsort(bm25.get_scores(tok(question)))[::-1][:12]
     chosen = [candidate_sents[i] for i in idx]
-    from sumy.parsers.plaintext import PlainTextParser
-    from sumy.nlp.tokenizers import Tokenizer
-    from sumy.summarizers.text_rank import TextRankSummarizer
     parser = PlainTextParser.from_string(" ".join(chosen), Tokenizer("english"))
     summ = TextRankSummarizer()
     out = " ".join(str(s) for s in summ(parser.document, max_final_sents)).strip()
     return out or " ".join(chosen[:max_final_sents])
 
 # ===================== 3.5) الرياضيات المتقدمة (SymPy) =====================
-
 def normalize_math(expr: str) -> str:
-    """تطبيع/تنظيف تعبير رياضي ليقبله sympy."""
     t = (expr or "").strip()
-
-    # احذف "y=" أو "f(x)=" أو أي متغير مفرد يساوي
     t = re.sub(r'^\s*[yf]\s*\(\s*x\s*\)\s*=\s*', '', t, flags=re.I)
     t = re.sub(r'^\s*[a-zA-Z]\s*=\s*', '', t)
-
-    # إذا كان المستخدم كتب بالعربية "مشتق: ..." أو "تكامل: ..." خذ ما بعد النقطتين
-    m = re.search(r'[,:؛]\s*(.+)$', t)
-    t = m.group(1) if m else t
-
-    # استبدالات LaTeX الشائعة
-    t = (t.replace('\\cdot', '*')
-           .replace('\\sin', 'sin').replace('\\cos', 'cos').replace('\\tan', 'tan')
-           .replace('\\sqrt', 'sqrt')
-           .replace('^', '**'))
-
-    # أرقام عربية إلى إنجليزية (كـ احتياط)
+    m = re.search(r'[,:؛]\s*(.+)$', t); t = m.group(1) if m else t
+    t = (t.replace('\\cdot', '*').replace('\\sin', 'sin').replace('\\cos', 'cos')
+           .replace('\\tan', 'tan').replace('\\sqrt', 'sqrt').replace('^', '**'))
     arabic_digits = '٠١٢٣٤٥٦٧٨٩'
-    for i, d in enumerate(arabic_digits):
-        t = t.replace(d, str(i))
-
-    # مسافات زائدة
+    for i, d in enumerate(arabic_digits): t = t.replace(d, str(i))
     t = re.sub(r'\s+', ' ', t).strip()
     return t
 
-
 def detect_math_task(q: str) -> str:
-    """استنتاج نوع المهمة من النص العربي: مشتق/تكامل/تبسيط/حل معادلة/تقييم."""
     text = q.lower()
-    if any(w in text for w in ['مشتق', 'اشتق', 'اشتقاق', 'derivative', 'diff']):
-        return 'diff'
-    if any(w in text for w in ['تكامل', 'integral', 'integrate']):
-        return 'int'
-    if any(w in text for w in ['بسّط', 'تبسيط', 'simplify', 'تبسط']):
-        return 'simp'
-    if any(w in text for w in ['حل', 'احل', 'solve', 'معادلة', 'equation']):
-        return 'solve'
-    if any(w in text for w in ['حد', 'نهاية', 'limit']):
-        return 'limit'
-    if any(w in text for w in ['تحليل', 'factor']):
-        return 'factor'
-    if any(w in text for w in ['توسيع', 'expand']):
-        return 'expand'
-    # إن لم يذكر نوع المهمة نحاول التبسيط كافتراضي
+    if any(w in text for w in ['مشتق','اشتق','اشتقاق','derivative','diff']): return 'diff'
+    if any(w in text for w in ['تكامل','integral','integrate']): return 'int'
+    if any(w in text for w in ['بسّط','تبسيط','simplify','تبسط']): return 'simp'
+    if any(w in text for w in ['حل','احل','solve','معادلة','equation']): return 'solve'
+    if any(w in text for w in ['حد','نهاية','limit']): return 'limit'
+    if any(w in text for w in ['تحليل','factor']): return 'factor'
+    if any(w in text for w in ['توسيع','expand']): return 'expand'
     return 'auto'
 
-
 def solve_advanced_math(q: str):
-    """حل رياضيات متقدم (مشتق/تكامل/تبسيط/حل معادلات) باستخدام SymPy وإرجاع HTML عربي."""
     try:
         task = detect_math_task(q)
         expr_txt = normalize_math(q)
-
-        # متغيرات شائعة
         x, y, t, z = symbols('x y t z')
-        
-        # معالجة التعبير
         expr = sympify(expr_txt, dict(sin=sin, cos=cos, tan=tan, sqrt=sqrt))
-        
         result_html = f'<div class="card"><h4>📐 المسألة: {html.escape(q)}</h4><hr>'
-        res = None  # تهيئة المتغير
-        
+        res = None
         if task == 'diff':
             res = diff(expr, x)
             result_html += f'<h5>🧮 المشتق بالنسبة إلى x:</h5>'
             result_html += f'<p style="background:#f0f8ff;padding:15px;border-radius:8px;text-align:center;font-size:18px;"><strong>{latex(res)}</strong></p>'
             result_html += f'<p><strong>بالتدوين العادي:</strong> {res}</p>'
-            
         elif task == 'int':
             res = integrate(expr, x)
             result_html += f'<h5>∫ التكامل غير المحدد بالنسبة إلى x:</h5>'
             result_html += f'<p style="background:#f0fff0;padding:15px;border-radius:8px;text-align:center;font-size:18px;"><strong>{latex(res)} + C</strong></p>'
             result_html += f'<p><strong>بالتدوين العادي:</strong> {res} + C</p>'
-            
         elif task == 'solve':
-            # حل المعادلة
             if '=' in expr_txt:
                 lhs, rhs = expr_txt.split('=')
                 equation = sympify(lhs) - sympify(rhs)
             else:
                 equation = expr
-            
             solutions = solve(equation, x)
             result_html += f'<h5>🔍 حل المعادلة:</h5>'
             if solutions:
@@ -341,40 +304,29 @@ def solve_advanced_math(q: str):
             else:
                 result_html += f'<p>لا يوجد حل حقيقي للمعادلة</p>'
                 res = "لا يوجد حل"
-                
         elif task == 'factor':
             res = factor(expr)
             result_html += f'<h5>🔢 تحليل التعبير:</h5>'
             result_html += f'<p style="background:#fff5ee;padding:15px;border-radius:8px;text-align:center;font-size:18px;"><strong>{latex(res)}</strong></p>'
             result_html += f'<p><strong>بالتدوين العادي:</strong> {res}</p>'
-            
         elif task == 'expand':
             res = expand(expr)
             result_html += f'<h5>📐 توسيع التعبير:</h5>'
             result_html += f'<p style="background:#f5f5ff;padding:15px;border-radius:8px;text-align:center;font-size:18px;"><strong>{latex(res)}</strong></p>'
             result_html += f'<p><strong>بالتدوين العادي:</strong> {res}</p>'
-            
         elif task == 'limit':
-            # نحاول استخراج النهاية
-            res = limit(expr, x, oo)  # نهاية عند اللانهاية كافتراضي
+            res = limit(expr, x, oo)
             result_html += f'<h5>🎯 النهاية عند اللانهاية:</h5>'
             result_html += f'<p style="background:#ffeef5;padding:15px;border-radius:8px;text-align:center;font-size:18px;"><strong>{latex(res)}</strong></p>'
             result_html += f'<p><strong>بالتدوين العادي:</strong> {res}</p>'
-            
         else:
-            # محاولة تبسيط أو تقييم
             res = simplify(expr)
             result_html += f'<h5>✨ تبسيط/تقييم التعبير:</h5>'
             result_html += f'<p style="background:#f8f8ff;padding:15px;border-radius:8px;text-align:center;font-size:18px;"><strong>{latex(res)}</strong></p>'
             result_html += f'<p><strong>بالتدوين العادي:</strong> {res}</p>'
-
         result_html += '</div>'
-        
-        # نص للحفظ في قاعدة البيانات  
         result_text = f"نتيجة {task}: {res}"
-        
         return {"text": result_text, "html": result_html}
-
     except Exception as e:
         error_html = f'''<div class="card">
             <h4>❌ تعذّر فهم التعبير الرياضي</h4>
@@ -391,45 +343,33 @@ def solve_advanced_math(q: str):
         return {"text": f"خطأ: {str(e)}", "html": error_html}
 
 # ===================== 3.6) الإحصاء والاحتمالات =====================
-
 def solve_statistics_math(q: str):
-    """حل مسائل الإحصاء والاحتمالات"""
     try:
         result_html = f'<div class="card"><h4>📊 الإحصاء والاحتمالات: {html.escape(q)}</h4><hr>'
-        
         if 'متوسط' in q.lower() or 'mean' in q.lower():
-            # الوسط الحسابي
             result_html += f'<h5>📈 الوسط الحسابي (المتوسط):</h5>'
             result_html += f'<p><strong>الصيغة:</strong> المتوسط = (مجموع القيم) ÷ (عدد القيم)</p>'
             result_html += f'<p><strong>مثال:</strong> متوسط الأرقام 2, 4, 6, 8 = (2+4+6+8)÷4 = 5</p>'
             result_text = "قانون الوسط الحسابي"
-            
         elif 'وسيط' in q.lower() or 'median' in q.lower():
-            # الوسيط
             result_html += f'<h5>📊 الوسيط:</h5>'
             result_html += f'<p><strong>التعريف:</strong> الوسيط هو القيمة الوسطى عند ترتيب البيانات</p>'
             result_html += f'<p><strong>للعدد الفردي:</strong> الوسيط = القيمة الوسطى</p>'
             result_html += f'<p><strong>للعدد الزوجي:</strong> الوسيط = متوسط القيمتين الوسطيتين</p>'
             result_text = "قانون الوسيط"
-            
         elif 'منوال' in q.lower() or 'mode' in q.lower():
-            # المنوال
             result_html += f'<h5>📋 المنوال:</h5>'
             result_html += f'<p><strong>التعريف:</strong> المنوال هو القيمة الأكثر تكراراً في البيانات</p>'
             result_html += f'<p><strong>مثال:</strong> في المجموعة 2, 3, 3, 5, 3, 7 → المنوال = 3</p>'
             result_text = "تعريف المنوال"
-            
         elif 'انحراف معياري' in q.lower() or 'standard deviation' in q.lower():
-            # الانحراف المعياري
             result_html += f'<h5>📏 الانحراف المعياري:</h5>'
             result_html += f'<p><strong>الصيغة:</strong> σ = √[(Σ(x-μ)²)/N]</p>'
             result_html += f'<p><strong>المعنى:</strong> مقياس لتشتت البيانات حول المتوسط</p>'
             result_html += f'<p><strong>انحراف كبير:</strong> البيانات منتشرة</p>'
             result_html += f'<p><strong>انحراف صغير:</strong> البيانات مركزة</p>'
             result_text = "قانون الانحراف المعياري"
-            
         elif 'احتمال' in q.lower() or 'probability' in q.lower():
-            # الاحتمالات
             result_html += f'<h5>🎲 الاحتمالات:</h5>'
             result_html += f'<h6>القوانين الأساسية:</h6>'
             result_html += f'<p><strong>احتمال الحدث:</strong> P(A) = عدد النتائج المرغوبة / عدد النتائج الممكنة</p>'
@@ -437,17 +377,12 @@ def solve_statistics_math(q: str):
             result_html += f'<p><strong>احتمال الاتحاد:</strong> P(A∪B) = P(A) + P(B) - P(A∩B)</p>'
             result_html += f'<p><strong>احتمال شرطي:</strong> P(A|B) = P(A∩B) / P(B)</p>'
             result_text = "قوانين الاحتمالات"
-            
         elif 'تباين' in q.lower() or 'variance' in q.lower():
-            # التباين
             result_html += f'<h5>📐 التباين:</h5>'
             result_html += f'<p><strong>الصيغة:</strong> Var(X) = σ² = Σ(x-μ)²/N</p>'
             result_html += f'<p><strong>العلاقة:</strong> الانحراف المعياري = √التباين</p>'
-            result_html += f'<p><strong>المعنى:</strong> مقياس لمدى انتشار البيانات</p>'
             result_text = "قانون التباين"
-            
         else:
-            # معلومات عامة عن الإحصاء
             result_html += f'<h5>📊 مفاهيم إحصائية مهمة:</h5>'
             result_html += f'<h6>مقاييس النزعة المركزية:</h6>'
             result_html += f'<p><strong>المتوسط:</strong> مجموع القيم ÷ عددها</p>'
@@ -458,354 +393,189 @@ def solve_statistics_math(q: str):
             result_html += f'<p><strong>التباين:</strong> متوسط مربعات الانحرافات</p>'
             result_html += f'<p><strong>الانحراف المعياري:</strong> الجذر التربيعي للتباين</p>'
             result_text = "مفاهيم الإحصاء الأساسية"
-        
         result_html += '</div>'
         return {"text": result_text, "html": result_html}
-        
     except Exception:
         return None
 
 # ===================== 3.7) نظام رياضيات شامل لجميع المراحل =====================
-
 def detect_educational_level(q: str) -> str:
-    """تحديد المستوى التعليمي للسؤال الرياضي"""
-    import html
-    
-    # فك الترميز 
-    text = html.unescape(q).lower()
-    
-    # كشف خاص للنصوص المُشوّهة
-    if any(char in text for char in ['ù', 'ø', 'ù']):
-        # المثلث القائم يحتوي دائماً على هذه الأنماط المُشوّهة
+    import html as _html
+    text = _html.unescape(q).lower()
+    if any(char in text for char in ['ù','ø']):
         if ('ø«' in text and 'ùø§ø¦' in text) or ('ù' in text and 'ø«' in text):
             return 'middle_school'
-    
-    # الإحصاء والاحتمالات
-    statistics_keywords = ['متوسط', 'وسيط', 'منوال', 'انحراف معياري', 'تباين', 'احتمال', 'إحصاء', 'probability', 'statistics']
-    if any(keyword in text for keyword in statistics_keywords):
-        return 'statistics'
-    
-    # مؤشرات الرياضيات الجامعية
-    university_keywords = ['مشتق', 'تكامل', 'نهاية', 'متسلسلة', 'مصفوفة', 'معادلة تفاضلية', 'لابلاس', 'فورير']
-    if any(keyword in text for keyword in university_keywords):
-        return 'university'
-    
-    # مؤشرات الرياضيات الثانوية
-    high_school_keywords = ['sin', 'cos', 'tan', 'لوغاريتم', 'أسي', 'تربيعية', 'مثلثات', 'هندسة تحليلية']
-    if any(keyword in text for keyword in high_school_keywords):
-        return 'high_school'
-    
-    # مؤشرات الرياضيات الإعدادية  
-    middle_school_keywords = ['جبر', 'معادلة خطية', 'نسبة', 'تناسب', 'مساحة', 'محيط', 'حجم', 'مثلث', 'وتر', 'قائم', 'فيثاغورث', 'ضلع', 'زاوية', 'مربع', 'مستطيل', 'دائرة', 'قطر', 'نصف قطر']
-    if any(keyword in text for keyword in middle_school_keywords):
-        return 'middle_school'
-    
-    # فحص إذا كان السؤال يحتوي على عمليات حسابية واضحة
-    if any(op in text for op in ['+', '-', '*', '/', '×', '÷', '=', 'جمع', 'طرح', 'ضرب', 'قسمة', 'حساب']):
-        return 'elementary'
-    
-    # فحص للأرقام الحقيقية (ليس رموز الترميز المُشوّه)
-    # إذا كان النص يحتوي على أرقام عربية أو إنجليزية منفصلة
-    arabic_digits = '٠١٢٣٤٥٦٧٨٩'
-    real_digits = '0123456789'
-    
-    # البحث عن أرقام حقيقية (ليس جزء من ترميز مُشوّه)
-    has_real_numbers = False
-    for i, char in enumerate(text):
-        if char in real_digits or char in arabic_digits:
-            # تأكد أن الرقم ليس جزء من ترميز مُشوّه
-            if i == 0 or i == len(text)-1:  # أول أو آخر حرف
-                has_real_numbers = True
-                break
-            # إذا كان الرقم محاط بمسافات أو أحرف عادية
-            elif (text[i-1] in ' ،؟.' or text[i+1] in ' ،؟.'):
-                has_real_numbers = True
-                break
-    
-    if has_real_numbers:
-        return 'elementary'
-    
-    # ليس سؤال رياضي
+    statistics_keywords = ['متوسط','وسيط','منوال','انحراف معياري','تباين','احتمال','إحصاء','probability','statistics']
+    if any(k in text for k in statistics_keywords): return 'statistics'
+    university_keywords = ['مشتق','تكامل','نهاية','متسلسلة','مصفوفة','معادلة تفاضلية','لابلاس','فورير']
+    if any(k in text for k in university_keywords): return 'university'
+    high_school_keywords = ['sin','cos','tan','لوغاريتم','أسي','تربيعية','مثلثات','هندسة تحليلية']
+    if any(k in text for k in high_school_keywords): return 'high_school'
+    middle_school_keywords = ['جبر','معادلة خطية','نسبة','تناسب','مساحة','محيط','حجم','مثلث','وتر','قائم','فيثاغورث','ضلع','زاوية','مربع','مستطيل','دائرة','قطر','نصف قطر']
+    if any(k in text for k in middle_school_keywords): return 'middle_school'
+    if any(op in text for op in ['+','-','*','/','×','÷','=','جمع','طرح','ضرب','قسمة','حساب']): return 'elementary'
+    arabic_digits = '٠١٢٣٤٥٦٧٨٩'; real_digits = '0123456789'
+    for i, ch in enumerate(text):
+        if ch in real_digits or ch in arabic_digits:
+            if i == 0 or i == len(text)-1 or (text[i-1] in ' ،؟.' or text[i+1] in ' ،؟.'):
+                return 'elementary'
     return 'not_math'
 
 def solve_comprehensive_math(q: str):
-    """حل شامل للرياضيات - جميع المراحل التعليمية"""
     try:
         level = detect_educational_level(q)
-        
-        # إذا لم يكن السؤال رياضي، لا تعطي جواب رياضي
-        if level == 'not_math':
-            return None
-        
-        # الإحصاء والاحتمالات
-        if level == 'statistics':
-            return solve_statistics_math(q)
-        
-        # رياضيات الجامعة المتقدمة
-        elif level == 'university':
-            return solve_university_math(q)
-        
-        # رياضيات الثانوية
-        elif level == 'high_school':
-            return solve_high_school_math(q)
-        
-        # رياضيات الإعدادية
-        elif level == 'middle_school':
-            return solve_middle_school_math(q)
-        
-        # رياضيات الابتدائية (فقط إذا كان فيه أرقام أو عمليات حسابية)
-        elif level == 'elementary':
-            return solve_elementary_math(q)
-        
-        # إذا لم يتم تحديد نوع، لا تعطي جواب رياضي
-        else:
-            return None
-            
-    except Exception as e:
+        if level == 'not_math': return None
+        if level == 'statistics': return solve_statistics_math(q)
+        if level == 'university': return solve_university_math(q)
+        if level == 'high_school': return solve_high_school_math(q)
+        if level == 'middle_school': return solve_middle_school_math(q)
+        if level == 'elementary': return solve_elementary_math(q)
+        return None
+    except Exception:
         return None
 
 def solve_university_math(q: str):
-    """رياضيات الجامعة: تفاضل، تكامل، معادلات تفاضلية، جبر خطي"""
     try:
         task = detect_math_task(q)
         expr_txt = normalize_math(q)
         x, y, t, z = symbols('x y t z')
-        
         result_html = f'<div class="card"><h4>🎓 رياضيات جامعية: {html.escape(q)}</h4><hr>'
-        
-        # معالجة التعبير
         expr = sympify(expr_txt, dict(sin=sin, cos=cos, tan=tan, sqrt=sqrt))
-        
         if 'مشتق جزئي' in q.lower() or 'partial' in q.lower():
-            # مشتقات جزئية
-            res_x = diff(expr, x)
-            res_y = diff(expr, y) if 'y' in str(expr) else 0
+            res_x = diff(expr, x); res_y = diff(expr, y) if 'y' in str(expr) else 0
             result_html += f'<h5>∂ المشتقات الجزئية:</h5>'
             result_html += f'<p><strong>∂f/∂x = </strong>{res_x}</p>'
             result_html += f'<p><strong>∂f/∂y = </strong>{res_y}</p>'
             result_text = f"المشتقات الجزئية: ∂f/∂x = {res_x}, ∂f/∂y = {res_y}"
-            
         elif 'تكامل مضاعف' in q.lower() or 'double integral' in q.lower():
-            # تكاملات مضاعفة (محاولة بسيطة)
             res = integrate(integrate(expr, x), y)
             result_html += f'<h5>∬ التكامل المضاعف:</h5>'
             result_html += f'<p style="background:#e8f5e8;padding:15px;border-radius:8px;"><strong>{latex(res)} + C</strong></p>'
             result_text = f"التكامل المضاعف: {res}"
-            
         elif 'سلسلة' in q.lower() or 'series' in q.lower():
-            # سلاسل تايلور (محاولة بسيطة)
             from sympy import series
-            res = series(expr, x, 0, 6)  # سلسلة حول 0 حتى الدرجة 5
+            res = series(expr, x, 0, 6)
             result_html += f'<h5>📈 سلسلة تايلور:</h5>'
             result_html += f'<p style="background:#fff8dc;padding:15px;border-radius:8px;"><strong>{res}</strong></p>'
             result_text = f"سلسلة تايلور: {res}"
-            
         else:
-            # استخدام النظام العادي للرياضيات المتقدمة
             return solve_advanced_math(q)
-        
         result_html += '</div>'
         return {"text": result_text, "html": result_html}
-        
-    except Exception as e:
-        return solve_advanced_math(q)  # العودة للنظام العادي
+    except Exception:
+        return solve_advanced_math(q)
 
 def solve_high_school_math(q: str):
-    """رياضيات الثانوية: مثلثات، لوغاريتمات، دوال أسية"""
     try:
-        expr_txt = normalize_math(q)
-        x = symbols('x')
-        
+        expr_txt = normalize_math(q); x = symbols('x')
         result_html = f'<div class="card"><h4>🏫 رياضيات ثانوية: {html.escape(q)}</h4><hr>'
-        
-        if any(trig in q.lower() for trig in ['sin', 'cos', 'tan', 'مثلثات']):
-            # حساب المثلثات
+        if any(trig in q.lower() for trig in ['sin','cos','tan','مثلثات']):
             expr = sympify(expr_txt, dict(sin=sin, cos=cos, tan=tan))
-            
-            # تبسيط المتطابقات المثلثية
             simplified = simplify(expr)
             result_html += f'<h5>📐 حساب المثلثات:</h5>'
             result_html += f'<p><strong>التعبير الأصلي:</strong> {expr}</p>'
             result_html += f'<p><strong>بعد التبسيط:</strong> {simplified}</p>'
-            
-            # قيم زوايا خاصة
             if 'قيم' in q.lower() or 'زاوية' in q.lower():
                 result_html += f'<h6>قيم الزوايا الخاصة:</h6>'
-                result_html += f'<p>sin(30°) = 1/2, cos(30°) = √3/2</p>'
-                result_html += f'<p>sin(45°) = √2/2, cos(45°) = √2/2</p>'
-                result_html += f'<p>sin(60°) = √3/2, cos(60°) = 1/2</p>'
-            
+                result_html += f'<p>sin(30°)=1/2, cos(30°)=√3/2</p>'
+                result_html += f'<p>sin(45°)=√2/2, cos(45°)=√2/2</p>'
+                result_html += f'<p>sin(60°)=√3/2, cos(60°)=1/2</p>'
             result_text = f"حساب المثلثات: {simplified}"
-            
         elif 'لوغاريتم' in q.lower() or 'log' in q.lower():
-            # اللوغاريتمات
             from sympy import log, ln
             expr = sympify(expr_txt, dict(log=log, ln=ln))
-            
             expanded = expand(expr)
             result_html += f'<h5>📊 اللوغاريتمات:</h5>'
             result_html += f'<p><strong>التوسيع:</strong> {expanded}</p>'
-            
-            # خصائص اللوغاريتمات
-            result_html += f'<h6>خصائص اللوغاريتمات:</h6>'
-            result_html += f'<p>log(ab) = log(a) + log(b)</p>'
-            result_html += f'<p>log(a/b) = log(a) - log(b)</p>'
-            result_html += f'<p>log(a^n) = n×log(a)</p>'
-            
+            result_html += f'<h6>خصائص:</h6><p>log(ab)=log(a)+log(b)</p><p>log(a/b)=log(a)-log(b)</p><p>log(a^n)=n·log(a)</p>'
             result_text = f"اللوغاريتمات: {expanded}"
-            
         else:
-            # المعادلات التربيعية والدوال
             expr = sympify(expr_txt)
-            
             if 'معادلة تربيعية' in q.lower() or 'x^2' in expr_txt or 'x**2' in expr_txt:
                 solutions = solve(expr, x)
                 result_html += f'<h5>🔢 المعادلة التربيعية:</h5>'
                 result_html += f'<p><strong>المعادلة:</strong> {expr} = 0</p>'
-                
                 if solutions:
                     result_html += f'<p><strong>الحلول:</strong></p>'
                     for i, sol in enumerate(solutions, 1):
                         result_html += f'<p>x{i} = {sol}</p>'
-                    
-                    # قانون الحل التربيعي
-                    result_html += f'<h6>قانون الحل التربيعي: x = (-b ± √(b²-4ac)) / 2a</h6>'
+                    result_html += f'<h6>قانون: x = (-b ± √(b²-4ac)) / 2a</h6>'
                 else:
                     result_html += f'<p>لا يوجد حل حقيقي</p>'
-                
                 result_text = f"حلول المعادلة التربيعية: {solutions}"
             else:
                 return solve_advanced_math(q)
-        
         result_html += '</div>'
         return {"text": result_text, "html": result_html}
-        
     except Exception:
         return solve_advanced_math(q)
 
 def solve_middle_school_math(q: str):
-    """رياضيات الإعدادية: جبر أساسي، هندسة، نسب"""
     try:
         result_html = f'<div class="card"><h4>🏛️ رياضيات إعدادية: {html.escape(q)}</h4><hr>'
-        
-        if any(word in q.lower() for word in ['مثلث قائم', 'وتر', 'فيثاغورث']):
-            # حل مسائل المثلث القائم
+        if any(word in q.lower() for word in ['مثلث قائم','وتر','فيثاغورث']):
             result_html += f'<h5>📐 المثلث القائم الزاوية:</h5>'
-            result_html += f'<h6>📏 نظرية فيثاغورث:</h6>'
-            result_html += f'<p><strong>القانون:</strong> الوتر² = الضلع الأول² + الضلع الثاني²</p>'
-            result_html += f'<h6>✨ إذا كان الوتر = 10 سم:</h6>'
-            result_html += f'<p><strong>🔹 إذا كان الضلعان متساويان:</strong></p>'
-            result_html += f'<p>الضلع = 10 ÷ √2 = 10 ÷ 1.414 ≈ <span style="color:#e74c3c;font-weight:bold;">7.07 سم</span></p>'
-            result_html += f'<p><strong>🔹 مثلث شائع (6-8-10):</strong></p>'
-            result_html += f'<p>إذا كان أحد الأضلاع = 6 سم، الآخر = <span style="color:#e74c3c;font-weight:bold;">8 سم</span></p>'
-            result_html += f'<p>إذا كان أحد الأضلاع = 8 سم، الآخر = <span style="color:#e74c3c;font-weight:bold;">6 سم</span></p>'
-            result_html += f'<p><strong>🔹 التحقق:</strong> 6² + 8² = 36 + 64 = 100 = 10²</p>'
+            result_html += f'<h6>الوتر² = الضلع¹² + الضلع²²</h6>'
+            result_html += f'<p>لو الوتر = 10 سم → الضلعان المتساويان ≈ 7.07 سم (10/√2)</p>'
+            result_html += f'<p>مثال 6-8-10: 6²+8²=36+64=100=10²</p>'
             result_text = "حل مسألة المثلث القائم - الوتر 10 سم"
-            
         elif 'مساحة' in q.lower():
-            # حساب المساحات
-            result_html += f'<h5>📐 حساب المساحات:</h5>'
-            result_html += f'<h6>صيغ المساحات الشائعة:</h6>'
-            result_html += f'<p><strong>المربع:</strong> المساحة = الضلع²</p>'
-            result_html += f'<p><strong>المستطيل:</strong> المساحة = الطول × العرض</p>'
-            result_html += f'<p><strong>المثلث:</strong> المساحة = ½ × القاعدة × الارتفاع</p>'
-            result_html += f'<p><strong>الدائرة:</strong> المساحة = π × نق²</p>'
+            result_html += f'<h5>📐 صيغ المساحات:</h5>'
+            result_html += f'<p>مربع: s² — مستطيل: l×w — مثلث: ½×القاعدة×الارتفاع — دائرة: πr²</p>'
             result_text = "صيغ حساب المساحات"
-            
         elif 'محيط' in q.lower():
-            # حساب المحيطات
-            result_html += f'<h5>⭕ حساب المحيطات:</h5>'
-            result_html += f'<h6>صيغ المحيطات الشائعة:</h6>'
-            result_html += f'<p><strong>المربع:</strong> المحيط = 4 × الضلع</p>'
-            result_html += f'<p><strong>المستطيل:</strong> المحيط = 2 × (الطول + العرض)</p>'
-            result_html += f'<p><strong>المثلث:</strong> المحيط = مجموع الأضلاع الثلاثة</p>'
-            result_html += f'<p><strong>الدائرة:</strong> المحيط = 2 × π × نق</p>'
+            result_html += f'<h5>⭕ صيغ المحيطات:</h5>'
+            result_html += f'<p>مربع: 4s — مستطيل: 2(l+w) — مثلث: مجموع الأضلاع — دائرة: 2πr</p>'
             result_text = "صيغ حساب المحيطات"
-            
         elif 'نسبة' in q.lower() or 'تناسب' in q.lower():
-            # النسب والتناسب
             result_html += f'<h5>⚖️ النسب والتناسب:</h5>'
-            result_html += f'<h6>قوانين النسب:</h6>'
-            result_html += f'<p><strong>النسبة:</strong> a : b = a/b</p>'
-            result_html += f'<p><strong>التناسب:</strong> a/b = c/d → a×d = b×c</p>'
-            result_html += f'<p><strong>النسبة المئوية:</strong> النسبة المئوية = (الجزء/الكل) × 100</p>'
+            result_html += f'<p>a:b = a/b — و a/b = c/d ⇒ ad = bc — النسبة المئوية = (الجزء/الكل)×100</p>'
             result_text = "قوانين النسب والتناسب"
-            
         else:
-            # معادلات خطية بسيطة
             try:
-                expr_txt = normalize_math(q)
-                x = symbols('x')
-                expr = sympify(expr_txt)
+                expr_txt = normalize_math(q); x = symbols('x'); expr = sympify(expr_txt)
                 solutions = solve(expr, x)
-                
-                result_html += f'<h5>🔢 المعادلات الخطية:</h5>'
+                result_html += f'<h5>🔢 معادلات خطية:</h5>'
                 result_html += f'<p><strong>المعادلة:</strong> {expr} = 0</p>'
-                
                 if solutions:
                     result_html += f'<p><strong>الحل:</strong> x = {solutions[0]}</p>'
                     result_text = f"حل المعادلة الخطية: x = {solutions[0]}"
                 else:
                     result_html += f'<p>معادلة بدون حل أو حل لامنهائي</p>'
                     result_text = "معادلة خاصة"
-                    
             except:
                 return None
-        
         result_html += '</div>'
         return {"text": result_text, "html": result_html}
-        
     except Exception:
         return None
 
 def solve_elementary_math(q: str):
-    """رياضيات الابتدائية: العمليات الأساسية، الكسور، الأعداد"""
     try:
         result_html = f'<div class="card"><h4>🧮 رياضيات ابتدائية: {html.escape(q)}</h4><hr>'
-        
-        # أولاً نجرب الحاسبة العادية
         calc_result = try_calc_ar(q)
-        if calc_result:
-            return calc_result
-        
+        if calc_result: return calc_result
         if 'كسر' in q.lower() or '/' in q:
-            # الكسور
             result_html += f'<h5>🍰 الكسور:</h5>'
-            result_html += f'<h6>عمليات الكسور:</h6>'
-            result_html += f'<p><strong>جمع الكسور:</strong> a/b + c/d = (ad + bc)/(bd)</p>'
-            result_html += f'<p><strong>طرح الكسور:</strong> a/b - c/d = (ad - bc)/(bd)</p>'
-            result_html += f'<p><strong>ضرب الكسور:</strong> a/b × c/d = (ac)/(bd)</p>'
-            result_html += f'<p><strong>قسمة الكسور:</strong> a/b ÷ c/d = (ad)/(bc)</p>'
+            result_html += f'<p>a/b + c/d = (ad+bc)/(bd) — a/b − c/d = (ad−bc)/(bd)</p>'
+            result_html += f'<p>a/b × c/d = (ac)/(bd) — a/b ÷ c/d = (ad)/(bc)</p>'
             result_text = "قوانين عمليات الكسور"
-            
         elif 'ضرب' in q.lower() and 'جدول' in q.lower():
-            # جداول الضرب
-            result_html += f'<h5>✖️ جداول الضرب:</h5>'
+            result_html += f'<h5>✖️ جداول الضرب 1→10</h5>'
             for i in range(1, 11):
-                result_html += f'<p>{i} × 1 = {i}, {i} × 2 = {i*2}, {i} × 3 = {i*3}, ... {i} × 10 = {i*10}</p>'
+                result_html += f'<p>{i} × 1 = {i}, …, {i} × 10 = {i*10}</p>'
             result_text = "جداول الضرب من 1 إلى 10"
-            
         elif 'أعداد أولية' in q.lower():
-            # الأعداد الأولية
-            primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]
-            result_html += f'<h5>🔢 الأعداد الأولية:</h5>'
-            result_html += f'<p><strong>الأعداد الأولية أقل من 50:</strong></p>'
-            result_html += f'<p>{", ".join(map(str, primes))}</p>'
-            result_html += f'<p><strong>تعريف:</strong> العدد الأولي هو عدد أكبر من 1 ولا يقبل القسمة إلا على نفسه وعلى الواحد</p>'
+            primes = [2,3,5,7,11,13,17,19,23,29,31,37,41,43,47]
+            result_html += f'<h5>🔢 الأعداد الأولية أقل من 50:</h5><p>{", ".join(map(str, primes))}</p>'
+            result_html += f'<p>الأولي: عدد >1 لا يقبل القسمة إلا على 1 ونفسه</p>'
             result_text = f"الأعداد الأولية: {primes}"
-            
         else:
-            # عمليات حسابية أساسية
             result_html += f'<h5>🧮 العمليات الأساسية:</h5>'
-            result_html += f'<p><strong>الجمع (+):</strong> ضع الأرقام فوق بعضها واجمع كل عمود</p>'
-            result_html += f'<p><strong>الطرح (-):</strong> اطرح الرقم السفلي من العلوي في كل عمود</p>'
-            result_html += f'<p><strong>الضرب (×):</strong> اضرب كل رقم بكل الأرقام الأخرى</p>'
-            result_html += f'<p><strong>القسمة (÷):</strong> كم مرة يدخل المقسوم عليه في المقسوم</p>'
+            result_html += f'<p>جمع/طرح/ضرب/قسمة — ابدأ بالمراتب ثم احذر المنازل</p>'
             result_text = "العمليات الحسابية الأساسية"
-        
         result_html += '</div>'
         return {"text": result_text, "html": result_html}
-        
     except Exception:
         return None
 
@@ -813,19 +583,16 @@ def solve_elementary_math(q: str):
 def render_page(q="", mode="summary", result_panel=""):
     active = lambda m: "active" if mode==m else ""
     checked= lambda m: "checked" if mode==m else ""
-    
-    # تقسيم JavaScript لتجنب مشاكل f-string مع assignment operators
     js_script = '''
 document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        btn.querySelector('input').checked = true;
-    });
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    btn.querySelector('input').checked = true;
+  });
 });
 document.getElementById('question').focus();
     '''
-    
     return f"""<!DOCTYPE html>
 <html lang="ar" dir="rtl"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -878,57 +645,70 @@ async def home(request: Request):
     mode = request.query_params.get("mode", "summary")
     return render_page(q, mode)
 
+@app.get("/test", response_class=HTMLResponse)
+async def test_page():
+    return HTMLResponse("""
+    <!DOCTYPE html><html lang="ar"><head><meta charset="UTF-8"><title>اختبار</title></head>
+    <body style="font-family: Arial; padding: 50px; text-align: center; background: #f0f8ff;">
+        <h1 style="color: #333;">🎉 الخادم يعمل بنجاح!</h1>
+        <p style="font-size: 18px;">إذا ترى هذه الرسالة، فإن النظام يعمل بشكل صحيح.</p>
+        <a href="/" style="display:inline-block;margin:20px;padding:15px 30px;background:#4CAF50;color:white;text-decoration:none;border-radius:5px;">العودة للصفحة الرئيسية</a>
+    </body></html>
+    """)
+
 @app.post("/", response_class=HTMLResponse)
-async def run(question: str = Form(...), mode: str = Form("summary")):
+async def run(request: Request, question: str = Form(...), mode: str = Form("summary")):
     q = (question or "").strip()
+    try:
+        if q and len(q) > 0 and all(ord(c) < 256 for c in q):
+            q = q.encode('latin1').decode('utf-8')
+    except:
+        pass
     if not q: return render_page()
 
-    # 1) آلة حاسبة (أساسية)
     calc = try_calc_ar(q)
     if calc:
         save_question_history(q, calc["text"], "calculator")
         return render_page(q, mode, calc["html"])
 
-    # 1.5) نظام رياضيات شامل (جميع المراحل التعليمية)
     comprehensive_math = solve_comprehensive_math(q)
     if comprehensive_math:
         save_question_history(q, comprehensive_math["text"], "comprehensive_math")
         return render_page(q, mode, comprehensive_math["html"])
-    
-    # النظام الرياضي القديم كاحتياطي
-    if any(keyword in q.lower() for keyword in ['مشتق', 'تكامل', 'حل', 'تبسيط', 'تحليل', 'توسيع', 'نهاية', 'معادلة', 'solve', 'derivative', 'integral', 'limit']):
+
+    if any(k in q.lower() for k in ['مشتق','تكامل','حل','تبسيط','تحليل','توسيع','نهاية','معادلة','solve','derivative','integral','limit']):
         advanced_math = solve_advanced_math(q)
         if advanced_math:
             save_question_history(q, advanced_math["text"], "advanced_math")
             return render_page(q, mode, advanced_math["html"])
 
-    # 2) تحويل وحدات
     conv = convert_query_ar(q)
     if conv:
         save_question_history(q, conv["text"], "converter")
         return render_page(q, mode, conv["html"])
 
-    # 3) الذكاء الاصطناعي (Gemini AI)
+    # Gemini للأسئلة العامة
     if GEMINI_AVAILABLE and is_gemini_available():
-        ai_response = answer_with_ai(q)
-        if ai_response:
-            save_question_history(q, ai_response["text"], "ai_answer")
-            return render_page(q, mode, ai_response["html"])
+        has_math_only = any(op in q for op in ['+','-','×','÷','*','/','=','(',')']) and \
+            all(c.isdigit() or c in '+−×÷*/.=()٠١٢٣٤٥٦٧٨٩ ' for c in q.replace('س','').replace('ص',''))
+        if not has_math_only:
+            ai_response = answer_with_ai(q)
+            if ai_response:
+                save_question_history(q, ai_response["text"], "ai_answer")
+                return render_page(q, mode, ai_response["html"])
 
-    # 4) بحث/أسعار/صور (DuckDuckGo API)
+    # بحث/أسعار/صور (DuckDuckGo)
     try:
         results = []
         ddgs = DDGS()
         for r in ddgs.text(q, region="xa-ar", safesearch="moderate", max_results=12):
             results.append(r)
-
         snippets = [re.sub(r"\s+", " ", (r.get("body") or "")) for r in results]
         links    = [r.get("href") for r in results]
 
         if mode == "summary":
             texts = [s for s in snippets if s][:5]
-            final_answer = summarize_advanced(q, texts, max_final_sents=4) or \
-                           (" ".join(texts[:3]) if texts else "لم أجد ملخصًا.")
+            final_answer = summarize_advanced(q, texts, max_final_sents=4) or (" ".join(texts[:3]) if texts else "لم أجد ملخصًا.")
             panel = f'<div class="card">{html.escape(final_answer)}</div>'
             save_question_history(q, final_answer, "summary")
             return render_page(q, mode, panel)
@@ -962,8 +742,7 @@ async def history():
     rows = get_question_history(50)
     html_rows = ""
     for (qid, question, answer, mode, created_at) in rows:
-        dt = (created_at.strftime("%Y/%m/%d %H:%M") if hasattr(created_at, "strftime")
-              else str(created_at))
+        dt = (created_at.strftime("%Y/%m/%d %H:%M") if hasattr(created_at, "strftime") else str(created_at))
         html_rows += f"""
         <div class="card">
           <div><strong>📝 سؤال:</strong> {html.escape(question)}</div>
